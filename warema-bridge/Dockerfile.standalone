@@ -1,29 +1,22 @@
 ARG BUILD_FROM=node:18-alpine
 FROM ${BUILD_FROM}
 
-# Set locale
 ENV LANG C.UTF-8
 
-# Install socat and build tools for native modules
 RUN apk add --no-cache socat \
  && apk add --no-cache --virtual .build-deps \
       python3 make g++ linux-headers
 
-# Copy package definitions
 COPY rootfs/srv/package-lock.json /srv/
 COPY rootfs/srv/package.json      /srv/
 
 WORKDIR /srv
 
-# Install Node.js dependencies, incl. @serialport/bindings
 RUN npm ci
 
-# Remove build deps & caches
 RUN apk del .build-deps \
  && rm -rf /root/.npm /root/.cache
 
-# Copy the actual application code
 COPY rootfs/srv/ /srv/
 
-# Launch the bridge directly
 ENTRYPOINT ["node", "/srv/bridge.js"]

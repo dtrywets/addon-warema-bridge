@@ -1,28 +1,29 @@
+# Nutze das Node 18‑basierte Home Assistant Base‑Image
 ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-node:18.16.0
 FROM ${BUILD_FROM}
 
-# Locale
+# Set locale
 ENV LANG C.UTF-8
 
-# Install socat and the build dependencies for native modules
+# Socat und Build‑Deps installieren
 RUN apk add --no-cache socat \
-    && apk add --no-cache --virtual .build-deps \
-         python3 make g++ linux-headers
+ && apk add --no-cache --virtual .build-deps \
+      python3 make g++ linux-headers
 
-# Copy package definitions
+# Package‑Manifeste kopieren
 COPY rootfs/srv/package-lock.json /srv/
 COPY rootfs/srv/package.json      /srv/
 
 WORKDIR /srv
 
-# Install Node.js dependencies (including @serialport/bindings)
+# Node‑Module installieren (inkl. @serialport/bindings)
 RUN npm ci
 
-# Remove build dependencies and caches to slim down the image
+# Build‑Deps und Cache wieder entfernen
 RUN apk del .build-deps \
-    && rm -rf /root/.npm /root/.cache
+ && rm -rf /root/.npm /root/.cache
 
-# Copy the rest of the add‑on filesystem
+# Rest der Add‑on‑Dateien ins Image
 COPY rootfs/ /
 
-# No CMD or ENTRYPOINT: Home Assistant injects /init for s6-overlay
+# Kein CMD/ENTRYPOINT setzen – HA verwendet /init automatisch
