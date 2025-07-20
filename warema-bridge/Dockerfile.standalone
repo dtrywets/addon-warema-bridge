@@ -1,24 +1,29 @@
-ARG BUILD_FROM=alpine:3.13.2
-# hadolint ignore=DL3006
+ARG BUILD_FROM=node:18-alpine
 FROM ${BUILD_FROM}
 
-# Setup base
-# hadolint ignore=DL3003
-RUN \
-    apk add --no-cache --virtual .build-deps python3 make g++ linux-headers
-RUN \
-    apk add --no-cache npm
-RUN apk add --no-cache socat
-# Copy root filesystem
-COPY rootfs/srv/package-lock.json /srv
-COPY rootfs/srv/package.json /srv
+# Set locale
+ENV LANG C.UTF-8
+
+# Install socat and build tools for native modules
+RUN apk add --no-cache socat \
+ && apk add --no-cache --virtual .build-deps \
+      python3 make g++ linux-headers
+
+# Copy package definitions
+COPY rootfs/srv/package-lock.json /srv/
+COPY rootfs/srv/package.json      /srv/
 
 WORKDIR /srv
 
+# Install Node.js dependencies, incl. @serialport/bindings
 RUN npm ci
 
-RUN apk del --no-cache --purge .build-deps && rm -rf /root/.npm /root/.cache
+# Remove build deps & caches
+RUN apk del .build-deps \
+ && rm -rf /root/.npm /root/.cache
 
-COPY rootfs/srv /srv
+# Copy the actual application code
+COPY rootfs/srv/ /srv/
 
-ENTRYPOINT ["/usr/bin/node", "/srv/bridge.js"]
+# Launch the bridge directly
+ENTRYPOINT ["node", "/srv/bridge.js"]

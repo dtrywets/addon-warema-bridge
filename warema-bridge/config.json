@@ -1,6 +1,6 @@
 {
   "name": "Warema Bridge",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "slug": "warema-bridge",
   "description": "Control your Warema WMS system through socat and ser2net",
   "arch": ["aarch64", "amd64", "armv7", "i386"],
