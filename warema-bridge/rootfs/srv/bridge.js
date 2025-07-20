@@ -1,3 +1,53 @@
+const { spawn } = require('child_process');
+const fs = require('fs');
+
+// Parameter anpassen
+const devicePath = process.env.WMS_SERIAL_PORT || '/dev/ttyUSBwarema';
+const socatHost = process.env.SOCAT_HOST || '192.168.20.20';
+const socatPort = process.env.SOCAT_PORT || '2004';
+
+// Starte socat
+console.log(`Starte socat für ${socatHost}:${socatPort} zu ${devicePath}`);
+const socat = spawn('socat', [
+  `PTY,link=${devicePath},raw`,
+  `TCP:${socatHost}:${socatPort}`
+]);
+
+socat.stdout.on('data', (data) => console.log(`socat: ${data.toString().trim()}`));
+socat.stderr.on('data', (data) => console.error(`socat [err]: ${data.toString().trim()}`));
+
+socat.on('exit', (code) => {
+  console.error(`socat wurde beendet mit Code ${code}`);
+  process.exit(1); // Beende auch Node.js-App, falls socat stirbt
+});
+
+// Warte auf das Device
+function waitForDevice(path, timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    (function check() {
+      if (fs.existsSync(path)) return resolve();
+      if (Date.now() - start > timeout) return reject(`Device ${path} nicht gefunden`);
+      setTimeout(check, 250);
+    })();
+  });
+}
+
+// Async IIFE zum Starten der App
+(async () => {
+  try {
+    await waitForDevice(devicePath);
+    console.log(`Device ${devicePath} bereit – starte Warema Bridge...`);
+
+    // Hier beginnt dein bisheriger Code zur Bridge-Kommunikation...
+    require('./start-warema.js'); // ← falls ausgelagert
+  } catch (err) {
+    console.error(err);
+    process.exit(1);
+  }
+})();
+
+
 const warema = require('warema-wms-venetian-blinds');
 var mqtt = require('mqtt')
 
@@ -13,7 +63,7 @@ const settingsPar = {
     wmsChannel   : process.env.WMS_CHANNEL     || 17,
     wmsKey       : process.env.WMS_KEY         || '00112233445566778899AABBCCDDEEFF',
     wmsPanid     : process.env.WMS_PAN_ID      || 'FFFF',
-    wmsSerialPort: process.env.WMS_SERIAL_PORT || '/dev/ttyUSB0',
+    wmsSerialPort: process.env.WMS_SERIAL_PORT || '/dev/ttyUSBwarema',
   };
 
 var registered_shades = []
