@@ -1,5 +1,10 @@
 ################################################################################
-# 1) Builder Stage: nimm ein öffentliches Node‑18 Alpine‑Image
+# Build arguments (müssen vor dem ersten FROM stehen)
+ARG BUILD_FROM=hassioaddons/base:edge
+################################################################################
+
+################################################################################
+# 1) Builder Stage: öffentliches Node 18‑Alpine‑Image zum Kompilieren
 ################################################################################
 FROM node:18-alpine AS builder
 
@@ -20,7 +25,6 @@ COPY warema-bridge/rootfs/srv/ ./
 ################################################################################
 # 2) Runtime Stage: HA‑Base ohne npm oder Build‑Deps
 ################################################################################
-ARG BUILD_FROM=hassioaddons/base:edge
 FROM ${BUILD_FROM}
 
 SHELL ["/bin/bash","-o","pipefail","-c"]
@@ -38,4 +42,4 @@ COPY warema-bridge/rootfs/etc /etc
 
 WORKDIR /srv
 
-# HA holt sich automatisch /init, kein CMD nötig
+# Kein CMD/ENTRYPOINT: HA‑Supervisor nutzt /init automatisch
