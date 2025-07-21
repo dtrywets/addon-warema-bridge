@@ -1,29 +1,41 @@
-# Nutze das Node 18‑basierte Home Assistant Base‑Image
-ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base-node:18.16.0
-FROM ${BUILD_FROM}
+################################################################################
+# 1) Builder Stage: nimm ein öffentliches Node‑18 Alpine‑Image
+################################################################################
+FROM node:18-alpine AS builder
 
-# Set locale
 ENV LANG C.UTF-8
 
-# Socat und Build‑Deps installieren
-RUN apk add --no-cache socat \
- && apk add --no-cache --virtual .build-deps \
-      python3 make g++ linux-headers
-
-# Package‑Manifeste kopieren
-COPY rootfs/srv/package-lock.json /srv/
-COPY rootfs/srv/package.json      /srv/
+# Build‑Tools für native Module
+RUN apk add --no-cache python3 make g++ linux-headers
 
 WORKDIR /srv
 
-# Node‑Module installieren (inkl. @serialport/bindings)
+# Node‑Deps installieren & bauen
+COPY warema-bridge/rootfs/srv/package*.json ./
 RUN npm ci
 
-# Build‑Deps und Cache wieder entfernen
-RUN apk del .build-deps \
- && rm -rf /root/.npm /root/.cache
+# Restlichen Code rein
+COPY warema-bridge/rootfs/srv/ ./
 
-# Rest der Add‑on‑Dateien ins Image
-COPY rootfs/ /
+################################################################################
+# 2) Runtime Stage: HA‑Base ohne npm oder Build‑Deps
+################################################################################
+ARG BUILD_FROM=hassioaddons/base:edge
+FROM ${BUILD_FROM}
 
-# Kein CMD/ENTRYPOINT setzen – HA verwendet /init automatisch
+SHELL ["/bin/bash","-o","pipefail","-c"]
+
+ENV LANG C.UTF-8
+
+# Nur socat brauchen wir noch
+RUN apk add --no-cache socat
+
+# Übernimm alles aus dem Builder (inkl. node_modules!)
+COPY --from=builder /srv /srv
+
+# Kopiere deine s6‑Services
+COPY warema-bridge/rootfs/etc /etc
+
+WORKDIR /srv
+
+# HA holt sich automatisch /init, kein CMD nötig
