@@ -16,6 +16,9 @@ for var in WMS_KEY WMS_PAN_ID WMS_CHANNEL WMS_SERIAL_PORT IGNORED_DEVICES FORCE_
   fi
 done
 
+bashio::log.info "MQTT_SERVER is $MQTT_SERVER"
+bashio::log.info "MQTT_USER is $MQTT_USER"
+
 if ! bashio::services.available "mqtt" && ! bashio::config.exists 'mqtt.server'; then
     bashio::exit.nok "No internal MQTT service found and no MQTT server defined. Please install Mosquitto broker or specify your own."
 else
