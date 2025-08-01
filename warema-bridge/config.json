@@ -1,6 +1,6 @@
 {
   "name": "Warema Bridge - dtry",
-  "version": "0.994",
+  "version": "0.995",
   "slug": "warema_bridge",
   "description": "Control Warema WMS system",
   "arch": ["aarch64", "amd64", "armv7", "i386"],
@@ -11,18 +11,22 @@
   "hassio_api": true,
   "options": {
     "wms_serial_port": null,
-    "mqtt_server": "mqtt://core-mosquitto:1883",
-    "mqtt_user": "addons",
-    "mqtt_password": ""
+    "mqtt": {
+    "server": "mqtt://core-mosquitto:1883",
+    "user": "addons",
+    "password": ""
+    }
   },
   "schema": {
     "wms_key": "str?",
     "wms_pan_id": "str?",
     "wms_channel": "int?",
     "wms_serial_port": "device(subsystem=tty)",
-    "mqtt_server": "str?",
-    "mqtt_user": "str?",
-    "mqtt_password": "str?",
+    "mqtt": {
+    "server": "str?",
+    "user": "str?",
+    "password": "str?"
+    },
     "ignored_devices": "str?",
     "force_devices": "str?"
   },
