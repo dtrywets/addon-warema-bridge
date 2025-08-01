@@ -1,12 +1,12 @@
 {
-  "name": "Warema Bridge - Fisch",
-  "version": "0.98",
-  "slug": "warema_bridge_fisch",
+  "name": "Warema Bridge - dtry",
+  "version": "0.99",
+  "slug": "warema_bridge_dtry",
   "description": "Control Warema WMS system",
   "arch": ["aarch64", "amd64", "armv7", "i386"],
   "init": false,
   "startup": "services",
-  "url": "https://github.com/thauer/addon-warema-bridge",
+  "url": "https://github.com/dtrywets/addon-warema-bridge",
   "boot": "auto",
   "hassio_api": true,
   "options": {
