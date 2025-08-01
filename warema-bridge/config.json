@@ -10,16 +10,19 @@
   "boot": "auto",
   "hassio_api": true,
   "options": {
-    "wms_serial_port": null
+    "wms_serial_port": null,
+    "mqtt_server": "mqtt://core-mosquitto:1883",
+    "mqtt_user": "addons",
+    "mqtt_password": ""
   },
   "schema": {
     "wms_key": "str?",
     "wms_pan_id": "str?",
     "wms_channel": "int?",
     "wms_serial_port": "device(subsystem=tty)",
-    "MQTT_SERVER": "str?",
-    "MQTT_USER": "str?",
-    "MQTT_PASSWORD": "str?",
+    "mqtt_server": "str?",
+    "mqtt_user": "str?",
+    "mqtt_password": "str?",
     "ignored_devices": "str?",
     "force_devices": "str?"
   },
