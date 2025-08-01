@@ -1,6 +1,6 @@
 {
   "name": "Warema Bridge - dtry",
-  "version": "0.992",
+  "version": "0.993",
   "slug": "warema_bridge",
   "description": "Control Warema WMS system",
   "arch": ["aarch64", "amd64", "armv7", "i386"],
@@ -17,9 +17,9 @@
     "wms_pan_id": "str?",
     "wms_channel": "int?",
     "wms_serial_port": "device(subsystem=tty)",
-    "mqtt_server": "str?",
-    "mqtt_user": "str?",
-    "mqtt_password": "str?",
+    "MQTT_SERVER": "str?",
+    "MQTT_USER": "str?",
+    "MQTT_PASSWORD": "str?",
     "ignored_devices": "str?",
     "force_devices": "str?"
   },
