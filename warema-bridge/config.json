@@ -1,6 +1,6 @@
 {
   "name": "Warema Bridge - dtry",
-  "version": "0.993",
+  "version": "0.994",
   "slug": "warema_bridge",
   "description": "Control Warema WMS system",
   "arch": ["aarch64", "amd64", "armv7", "i386"],
