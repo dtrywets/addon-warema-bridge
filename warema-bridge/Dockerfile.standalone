@@ -1,12 +1,12 @@
+# addon-warema-bridge/warema-bridge/Dockerfile.standalone
 ARG BUILD_FROM=alpine:3.13.2
 FROM ${BUILD_FROM}
 
-# Set shell to bash
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# Erst Pakete installieren (mit /bin/ash), dann SHELL auf bash umstellen
+RUN apk add --no-cache bash npm python3 make g++ linux-headers
 
-# Basis + Build-Dependencies + Bash
-RUN apk add --no-cache --virtual .build-deps python3 make g++ linux-headers \
- && apk add --no-cache npm bash
+# Ab hier bash als Default-Shell
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Node-Package installieren
 COPY rootfs/srv/package.json /srv
@@ -14,9 +14,9 @@ WORKDIR /srv
 RUN npm install
 
 # Aufräumen
-RUN apk del --no-cache --purge .build-deps && rm -rf /root/.npm /root/.cache
+RUN apk del --no-cache linux-headers g++ make && rm -rf /root/.npm /root/.cache
 
-# Restliche Dateien
+# Restliche Dateien (bridge.js etc.)
 COPY rootfs/ /
 
 ENTRYPOINT ["/usr/bin/node", "/srv/bridge.js"]
