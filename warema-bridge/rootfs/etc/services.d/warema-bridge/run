@@ -7,7 +7,7 @@
 bashio::log.info 'Starting the Warema bridge...'
 
 # 1) klassische WMS-Werte laden
-for var in WMS_KEY WMS_PAN_ID WMS_CHANNEL WMS_SERIAL_PORT IGNORED_DEVICES FORCE_DEVICES POLLING_INTERVAL MOVING_INTERVAL; do
+for var in WMS_KEY WMS_PAN_ID WMS_CHANNEL WMS_SERIAL_PORT IGNORED_DEVICES FORCE_DEVICES KNOWN_DEVICES POLLING_INTERVAL MOVING_INTERVAL; do
   key=${var,,}   # Lowercase, z.B. wms_key
   if bashio::config.has_value "${key}"; then
     value=$(bashio::config "${key}")

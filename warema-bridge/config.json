@@ -26,6 +26,11 @@
     "wms_serial_port": "device(subsystem=tty)",
     "polling_interval": "int?",
     "moving_interval": "int?",
+    "known_devices": [{
+      "snr": "int",
+      "type": "int",
+      "name": "str?"
+    }],
     "mqtt": {
     "server": "str?",
     "user": "str?",

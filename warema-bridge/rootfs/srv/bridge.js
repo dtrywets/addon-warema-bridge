@@ -13,6 +13,32 @@ const listEnv = (name) => {
   return v.split(',').map((s) => s.trim()).filter(Boolean);
 };
 
+function parseKnownDevices(raw) {
+  const text = (raw || '').trim();
+  if (!text) return [];
+
+  // Home Assistant can pass object-list options as JSON array or linewise JSON objects.
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed;
+  } catch (_e) {
+    // Fallback handled below.
+  }
+
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch (_e) {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
 // WMS
 const WMS_SERIAL_PORT = env('WMS_SERIAL_PORT', '/dev/ttyUSB0');
 const WMS_CHANNEL = parseInt(env('WMS_CHANNEL', '17'), 10);
@@ -31,6 +57,7 @@ const MOVING_INTERVAL = Math.max(0, parseInt(env('MOVING_INTERVAL', '1000'), 10)
 // Device handling
 const IGNORED_DEVICES = new Set(listEnv('IGNORED_DEVICES')); // SNR (decimal, no leading zeros)
 const FORCE_DEVICES_RAW = listEnv('FORCE_DEVICES'); // Entries: "SNR" or "SNR:TYPE"
+const KNOWN_DEVICES = parseKnownDevices(env('KNOWN_DEVICES', ''));
 
 // Misc
 const HA_PREFIX = 'homeassistant';
@@ -247,6 +274,13 @@ function setIntervals() {
 }
 
 function registerDevices() {
+  if (KNOWN_DEVICES.length > 0) {
+    for (const kd of KNOWN_DEVICES) {
+      ensureDeviceRegistered(kd);
+    }
+    return;
+  }
+
   const forced = parseForcedDevices(FORCE_DEVICES_RAW);
   if (forced.length > 0) {
     for (const fd of forced) {
