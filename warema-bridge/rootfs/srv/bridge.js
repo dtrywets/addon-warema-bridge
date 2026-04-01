@@ -54,6 +54,8 @@ const MQTT_PASSWORD = env('MQTT_PASSWORD', '');
 // Behavior
 const POLLING_INTERVAL = Math.max(0, parseInt(env('POLLING_INTERVAL', '30000'), 10) || 30000);
 const MOVING_INTERVAL = Math.max(0, parseInt(env('MOVING_INTERVAL', '1000'), 10) || 1000);
+const COMMAND_DEDUP_MS = Math.max(0, parseInt(env('COMMAND_DEDUP_MS', '2000'), 10) || 2000);
+const WAKE_COOLDOWN_MS = Math.max(0, parseInt(env('WAKE_COOLDOWN_MS', '10000'), 10) || 10000);
 
 // Device handling
 const IGNORED_DEVICES = new Set(
@@ -81,6 +83,8 @@ const positions = new Map();
 
 // Weather sensor SNRs already announced via HA discovery
 const weatherAnnounced = new Set();
+const recentCommands = new Map(); // SNR -> { key, ts }
+const lastWaveByDevice = new Map(); // SNR -> timestamp
 
 /** ============= Helpers ============= */
 
@@ -177,9 +181,26 @@ function normalizeAngleForDevice(snr, angle) {
   return angle;
 }
 
+function shouldDispatchCommand(snr, key) {
+  const now = Date.now();
+  const prev = recentCommands.get(snr);
+  if (prev && prev.key === key && (now - prev.ts) < COMMAND_DEDUP_MS) {
+    console.log(`Skipping duplicate command for ${snr}: ${key}`);
+    return false;
+  }
+  recentCommands.set(snr, { key, ts: now });
+  return true;
+}
+
 function sendMoveCommand(snr, position, angle) {
-  // Some devices react more reliably when we send a wave request first.
-  callStickMethod('vnBlindWaveRequest', snr);
+  // Avoid flooding the queue with wave requests on bursty slider updates.
+  const now = Date.now();
+  const lastWave = lastWaveByDevice.get(snr) || 0;
+  if ((now - lastWave) >= WAKE_COOLDOWN_MS) {
+    callStickMethod('vnBlindWaveRequest', snr);
+    lastWaveByDevice.set(snr, now);
+  }
+
   const normalizedAngle = normalizeAngleForDevice(snr, angle);
   console.log(`Sending move command to ${snr}: position=${position} angle=${normalizedAngle}`);
   return callStickMethod('vnBlindSetPosition', snr, position, normalizedAngle);
@@ -431,7 +452,12 @@ function setIntervals() {
       console.log(`Interval for position update set to ${Math.round(POLLING_INTERVAL / 1000)}s.`);
     }
     if (typeof stickUsb.setWatchMovingBlindsInterval === 'function') {
-      stickUsb.setWatchMovingBlindsInterval(MOVING_INTERVAL);
+      // Very low moving intervals produce queue congestion and oscillation.
+      const effectiveMovingInterval = (MOVING_INTERVAL > 0 && MOVING_INTERVAL < 5000) ? 5000 : MOVING_INTERVAL;
+      if (effectiveMovingInterval !== MOVING_INTERVAL) {
+        console.log(`Moving interval ${MOVING_INTERVAL}ms too low, using ${effectiveMovingInterval}ms for stability.`);
+      }
+      stickUsb.setWatchMovingBlindsInterval(effectiveMovingInterval);
     }
   } catch (e) {
     console.log(`Failed to set intervals: ${e.message || e}`);
@@ -585,6 +611,7 @@ mqttClient.on('message', (topic, messageBuf) => {
   switch (command) {
     case 'set': {
       const val = msgStr.toUpperCase();
+      if (!shouldDispatchCommand(snr, `set:${val}`)) break;
       if (val === 'CLOSE') {
         sendMoveCommand(snr, 100, 0);
       } else if (val === 'OPEN') {
@@ -597,12 +624,14 @@ mqttClient.on('message', (topic, messageBuf) => {
     case 'set_position': {
       const target = parseInt(msgStr, 10);
       const pos = Number.isFinite(target) ? target : safePos;
+      if (!shouldDispatchCommand(snr, `set_position:${pos}`)) break;
       sendMoveCommand(snr, pos, safeAngle);
       break;
     }
     case 'set_tilt': {
       const target = parseInt(msgStr, 10);
       const ang = Number.isFinite(target) ? target : safeAngle;
+      if (!shouldDispatchCommand(snr, `set_tilt:${ang}`)) break;
       sendMoveCommand(snr, safePos, ang);
       break;
     }
