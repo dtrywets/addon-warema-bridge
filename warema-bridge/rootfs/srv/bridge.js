@@ -1,321 +1,414 @@
+// bridge.js — robust, defensive version
+'use strict';
+
 const warema = require('warema-wms-api');
-var mqtt = require('mqtt')
+const mqtt = require('mqtt');
 
-process.on('SIGINT', function() {
-    process.exit(0);
-});
+/** ============= ENV & Defaults ============= */
+const env = (name, def) => (process.env[name] ?? def);
 
+const listEnv = (name) => {
+  const v = env(name, '').trim();
+  if (!v) return [];
+  return v.split(',').map((s) => s.trim()).filter(Boolean);
+};
 
-const ignoredDevices = process.env.IGNORED_DEVICES ? process.env.IGNORED_DEVICES.split(',') : []
-const forceDevices = process.env.FORCE_DEVICES ? process.env.FORCE_DEVICES.split(',') : []
-const knownDevices = process.env.KNOWN_DEVICES ? process.env.KNOWN_DEVICES.split(',') : []
+// WMS
+const WMS_SERIAL_PORT = env('WMS_SERIAL_PORT', '/dev/ttyUSB0');
+const WMS_CHANNEL = parseInt(env('WMS_CHANNEL', '17'), 10);
+const WMS_PAN_ID = env('WMS_PAN_ID', 'FFFF');
+const WMS_KEY = env('WMS_KEY', '00112233445566778899AABBCCDDEEFF');
 
-const settingsPar = {
-    wmsChannel   : process.env.WMS_CHANNEL     || 17,
-    wmsKey       : process.env.WMS_KEY         || '00112233445566778899AABBCCDDEEFF',
-    wmsPanid     : process.env.WMS_PAN_ID      || 'FFFF',
-    wmsSerialPort: process.env.WMS_SERIAL_PORT || '/dev/ttyUSB0',
+// MQTT
+const MQTT_SERVER = env('MQTT_SERVER', 'mqtt://localhost:1883');
+const MQTT_USER = env('MQTT_USER', '');
+const MQTT_PASSWORD = env('MQTT_PASSWORD', '');
+
+// Behavior
+const POLLING_INTERVAL = Math.max(0, parseInt(env('POLLING_INTERVAL', '30000'), 10) || 30000);
+const MOVING_INTERVAL = Math.max(0, parseInt(env('MOVING_INTERVAL', '1000'), 10) || 1000);
+
+// Device handling
+const IGNORED_DEVICES = new Set(listEnv('IGNORED_DEVICES')); // SNR (decimal, no leading zeros)
+const FORCE_DEVICES_RAW = listEnv('FORCE_DEVICES'); // Entries: "SNR" or "SNR:TYPE"
+
+// Misc
+const HA_PREFIX = 'homeassistant';
+const BRIDGE_AVAIL_TOPIC = 'warema/bridge/state';
+const DISCOVERY_RETAIN = true;
+
+/** ============= State ============= */
+let stickUsb = null;
+
+// Device registry: SNR (Number) -> { snr:Number, name:String, type:Number }
+const devices = new Map();
+
+// Positions: SNR -> { position:Number, angle:Number }
+const positions = new Map();
+
+// Weather sensor SNRs already announced via HA discovery
+const weatherAnnounced = new Set();
+
+/** ============= Helpers ============= */
+
+function parseSnr(val) {
+  const n = parseInt(String(val).replace(/[^0-9]/g, ''), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseForcedDevices(list) {
+  // "00969444:25,12345" => [{snr:969444,type:25},{snr:12345,type:25}]
+  const out = [];
+  for (const item of list) {
+    const [idPart, typePart] = item.split(':').map((s) => s.trim());
+    const snr = parseSnr(idPart);
+    if (!snr) continue;
+    const type = parseInt(typePart || '25', 10);
+    out.push({ snr, type: Number.isFinite(type) ? type : 25 });
+  }
+  return out;
+}
+
+function addBlindToStick(snr, name) {
+  if (!stickUsb) return;
+  const addFn = stickUsb.vnBlindAdd || stickUsb.addVnBlind;
+  if (typeof addFn === 'function') {
+    try {
+      addFn.call(stickUsb, snr, name || String(snr));
+    } catch (e) {
+      console.log(`WMS addBlind failed for ${snr}: ${e.message || e}`);
+    }
+  }
+}
+
+function ensureDeviceRegistered(element) {
+  const snr = parseSnr(element.snr);
+  if (!snr) return;
+
+  if (IGNORED_DEVICES.has(String(snr))) {
+    if (devices.has(snr)) devices.delete(snr);
+    return;
+  }
+
+  const name = element.name && String(element.name).trim() ? String(element.name).trim() : String(snr);
+  const type = parseInt(element.type, 10);
+  if (!Number.isFinite(type)) return;
+
+  devices.set(snr, { snr, name, type });
+  addBlindToStick(snr, name);
+  publishDiscoveryForDevice({ snr, name, type });
+  mqttClient.publish(`warema/${snr}/availability`, 'online', { retain: true });
+}
+
+function publishDiscoveryForDevice({ snr, name, type }) {
+  const availability = [
+    { topic: BRIDGE_AVAIL_TOPIC },
+    { topic: `warema/${snr}/availability` },
+  ];
+  const baseDevice = {
+    identifiers: String(snr),
+    manufacturer: 'Warema',
+    name: name || String(snr),
   };
 
-var registered_shades = []
-var shade_position = []
+  let payload = null;
+  let model = null;
+  const topic = `${HA_PREFIX}/cover/${snr}/${snr}/config`;
 
-function registerDevice(element) {
-  console.log('Registering ' + element.snr)
-  if(element.name == undefined) {
-	  element.name=element.snr.toString()
-  }
-  var topic = 'homeassistant/cover/' + element.snr + '/' + element.snr + '/config'
-  var availability_topic = 'warema/' + element.snr + '/availability'
-
-  var base_payload = {
-   
-    availability: [
-      {topic: 'warema/bridge/state'},
-      {topic: availability_topic}
-    ],
-    unique_id: element.snr,
-    has_entity_name: true
-  }
-
-  var base_device = {
-    identifiers: element.snr,
-    manufacturer: "Warema",
-    name: element.snr
-  }
-
-  var model
-  var payload
-  switch (parseInt(element.type)) {
+  switch (Number(type)) {
     case 6:
-      model = 'Weather station'
-      payload = {
-        ...base_payload,
-        device: {
-          ...base_device,
-          model: model
-        }
-      }
-      break
-    // WMS WebControl Pro - while part of the network, we have no business to do with it.
-    case 9:
-      return
+      return;
     case 20:
-      model = 'Plug receiver'
+      model = 'Plug receiver';
       payload = {
-        ...base_payload,
-        device: {
-          ...base_device,
-          model: model
-        },
+        availability,
+        unique_id: String(snr),
+        has_entity_name: true,
+        device: { ...baseDevice, model },
         position_open: 0,
         position_closed: 100,
-        command_topic: 'warema/' + element.snr + '/set',
-        position_topic: 'warema/' + element.snr + '/position',
-        tilt_status_topic: 'warema/' + element.snr + '/tilt',
-        set_position_topic: 'warema/' + element.snr + '/set_position',
-        tilt_command_topic: 'warema/' + element.snr + '/set_tilt',
+        command_topic: `warema/${snr}/set`,
+        position_topic: `warema/${snr}/position`,
+        tilt_status_topic: `warema/${snr}/tilt`,
+        set_position_topic: `warema/${snr}/set_position`,
+        tilt_command_topic: `warema/${snr}/set_tilt`,
         tilt_closed_value: 100,
         tilt_opened_value: -100,
         tilt_min: -100,
         tilt_max: 100,
-      }
-      break
+      };
+      break;
     case 21:
-      model = 'Actuator UP'
+      model = 'Actuator UP';
       payload = {
-        ...base_payload,
-        device: {
-          ...base_device,
-          model: model
-        },
+        availability,
+        unique_id: String(snr),
+        has_entity_name: true,
+        device: { ...baseDevice, model },
         position_open: 0,
         position_closed: 100,
-        command_topic: 'warema/' + element.snr + '/set',
-        position_topic: 'warema/' + element.snr + '/position',
-        tilt_status_topic: 'warema/' + element.snr + '/tilt',
-        set_position_topic: 'warema/' + element.snr + '/set_position',
-        tilt_command_topic: 'warema/' + element.snr + '/set_tilt',
+        command_topic: `warema/${snr}/set`,
+        position_topic: `warema/${snr}/position`,
+        tilt_status_topic: `warema/${snr}/tilt`,
+        set_position_topic: `warema/${snr}/set_position`,
+        tilt_command_topic: `warema/${snr}/set_tilt`,
         tilt_closed_value: -100,
         tilt_opened_value: 100,
         tilt_min: -100,
         tilt_max: 100,
-      }
-      break
+      };
+      break;
     case 25:
-      model = 'Vertical awning'
+      model = 'Radio motor (cover)';
       payload = {
-        ...base_payload,
-        device: {
-          ...base_device,
-          model: model
-        },
+        availability,
+        unique_id: String(snr),
+        has_entity_name: true,
+        device: { ...baseDevice, model },
         position_open: 0,
         position_closed: 100,
-        command_topic: 'warema/' + element.snr + '/set',
-        position_topic: 'warema/' + element.snr + '/position',
-        set_position_topic: 'warema/' + element.snr + '/set_position',
-      }
-      break
+        command_topic: `warema/${snr}/set`,
+        position_topic: `warema/${snr}/position`,
+        set_position_topic: `warema/${snr}/set_position`,
+      };
+      break;
+    case 9:
+      return;
     default:
-      console.log('Unrecognized device type: ' + element.type)
-      model = 'Unknown model ' + element.type
-      return
+      console.log(`Unrecognized or unsupported device type ${type} for ${snr}, skipping discovery.`);
+      return;
   }
 
-  if (ignoredDevices.includes(element.snr.toString())) {
-    console.log('Ignoring and removing device ' + element.snr + ' (type ' + element.type + ')')
-  } else {
-    console.log('Adding device ' + element.snr + ' (type ' + element.type + ')')
+  mqttClient.publish(topic, JSON.stringify(payload), { retain: DISCOVERY_RETAIN });
+}
 
-    stickUsb.vnBlindAdd(parseInt(element.snr), element.name);
-    registered_shades += element.snr
-    client.publish(availability_topic, 'online', {retain: true})
+function announceWeatherSensors(snr) {
+  if (weatherAnnounced.has(snr)) return;
+  weatherAnnounced.add(snr);
+
+  const availability = [
+    { topic: BRIDGE_AVAIL_TOPIC },
+    { topic: `warema/${snr}/availability` },
+  ];
+  const base = {
+    name: String(snr),
+    availability,
+    device: {
+      identifiers: String(snr),
+      manufacturer: 'Warema',
+      model: 'Weather Station',
+      name: String(snr),
+    },
+    force_update: true,
+  };
+
+  const mk = (kind, extra) => ({
+    ...base,
+    ...extra,
+    unique_id: `${snr}_${kind}`,
+  });
+
+  mqttClient.publish(
+    `${HA_PREFIX}/sensor/${snr}/illuminance/config`,
+    JSON.stringify(mk('illuminance', { state_topic: `warema/${snr}/illuminance/state`, device_class: 'illuminance', unit_of_measurement: 'lx' })),
+    { retain: DISCOVERY_RETAIN },
+  );
+  mqttClient.publish(
+    `${HA_PREFIX}/sensor/${snr}/temperature/config`,
+    JSON.stringify(mk('temperature', { state_topic: `warema/${snr}/temperature/state`, device_class: 'temperature', unit_of_measurement: 'C' })),
+    { retain: DISCOVERY_RETAIN },
+  );
+  mqttClient.publish(
+    `${HA_PREFIX}/sensor/${snr}/wind/config`,
+    JSON.stringify(mk('wind', { state_topic: `warema/${snr}/wind/state`, unit_of_measurement: 'm/s' })),
+    { retain: DISCOVERY_RETAIN },
+  );
+  mqttClient.publish(
+    `${HA_PREFIX}/sensor/${snr}/rain/config`,
+    JSON.stringify(mk('rain', { state_topic: `warema/${snr}/rain/state` })),
+    { retain: DISCOVERY_RETAIN },
+  );
+
+  mqttClient.publish(`warema/${snr}/availability`, 'online', { retain: true });
+}
+
+function setIntervals() {
+  try {
+    if (typeof stickUsb.setPosUpdInterval === 'function') {
+      stickUsb.setPosUpdInterval(POLLING_INTERVAL);
+      console.log(`Interval for position update set to ${Math.round(POLLING_INTERVAL / 1000)}s.`);
+    }
+    if (typeof stickUsb.setWatchMovingBlindsInterval === 'function') {
+      stickUsb.setWatchMovingBlindsInterval(MOVING_INTERVAL);
+    }
+  } catch (e) {
+    console.log(`Failed to set intervals: ${e.message || e}`);
   }
-  client.publish(topic, JSON.stringify(payload))
 }
 
 function registerDevices() {
-  registerDevice({snr: 00994624, name:"Markise"  , type:25 })
-  registerDevice({snr: 01140790, name:"PowerPlug1", type:25 })
-  registerDevice({snr: 01399553, name:"PowerPlug2", type:25 })
-  //registerDevice({snr: 01185462, name:"Handsender", type:07})
-
-  return;
-  if (forceDevices && forceDevices.length) {
-    forceDevices.forEach(element => {
-      registerDevice({snr: element, type: 25})
-    })
+  const forced = parseForcedDevices(FORCE_DEVICES_RAW);
+  if (forced.length > 0) {
+    for (const fd of forced) {
+      ensureDeviceRegistered(fd);
+    }
   } else {
-    console.log('Scanning...')
-    stickUsb.scanDevices({autoAssignBlinds: false});
-  }
-}
-
-function callback(err, msg) {
-  if(err) {
-    console.log('ERROR: ' + err);
-  }
-  if(msg) {
-    switch (msg.topic) {
-      case 'wms-vb-init-completion':
-        console.log('Warema init completed')
-        registerDevices()
-        stickUsb.setPosUpdInterval(30000);
-        break
-      case 'wms-vb-rcv-weather-broadcast':
-        if (registered_shades.includes(msg.payload.weather.snr)) {
-          client.publish('warema/' + msg.payload.weather.snr + '/illuminance/state', msg.payload.weather.lumen.toString())
-          client.publish('warema/' + msg.payload.weather.snr + '/temperature/state', msg.payload.weather.temp.toString())
-	  client.publish('warema/' + msg.payload.weather.snr + '/wind/state', msg.payload.weather.wind.toString())
-	  client.publish('warema/' + msg.payload.weather.snr + '/rain/state', msg.payload.weather.rain.toString())
-        } else {
-          var availability_topic = 'warema/' + msg.payload.weather.snr + '/availability'
-          var payload = {
-            name: msg.payload.weather.snr,
-            availability: [
-              {topic: 'warema/bridge/state'},
-              {topic: availability_topic}
-            ],
-            device: {
-              identifiers: msg.payload.weather.snr,
-              manufacturer: 'Warema',
-              model: 'Weather Station',
-              name: msg.payload.weather.snr
-            },
-            force_update: true
-          }
-
-          var illuminance_payload = {
-            ...payload,
-            state_topic: 'warema/' + msg.payload.weather.snr + '/illuminance/state',
-            device_class: 'illuminance',
-            unique_id: msg.payload.weather.snr + '_illuminance',
-            unit_of_measurement: 'lx',
-          }
-          client.publish('homeassistant/sensor/' + msg.payload.weather.snr + '/illuminance/config', JSON.stringify(illuminance_payload))
-
-          var temperature_payload = {
-            ...payload,
-            state_topic: 'warema/' + msg.payload.weather.snr + '/temperature/state',
-            device_class: 'temperature',
-            unique_id: msg.payload.weather.snr + '_temperature',
-            unit_of_measurement: 'C',
-          }
-          client.publish('homeassistant/sensor/' + msg.payload.weather.snr + '/temperature/config', JSON.stringify(temperature_payload))
-
-	  var wind_payload = {
-	    ...payload,
-	    state_topic: 'warema/' + msg.payload.weather.snr + '/wind/state',
-	    unique_id: msg.payload.weather.snr + '_wind',
-	    unit_of_measurement: 'm/s',
-	  }
-	  client.publish('homeassistant/sensor/' + msg.payload.weather.snr + '/wind/config', JSON.stringify(wind_payload))
-
-	  var rain_payload = {
-	    ...payload,
-	    state_topic: 'warema/' + msg.payload.weather.snr + '/rain/state',
-	    unique_id: msg.payload.weather.snr + '_rain',
-	  }
-	  client.publish('homeassistant/sensor/' + msg.payload.weather.snr + '/rain/config', JSON.stringify(rain_payload))
-	  
-          client.publish(availability_topic, 'online', {retain: true})
-          registered_shades += msg.payload.weather.snr
-        }
-        break
-      case 'wms-vb-blind-position-update':
-        client.publish('warema/' + msg.payload.snr + '/position', msg.payload.position.toString())
-        client.publish('warema/' + msg.payload.snr + '/tilt', msg.payload.angle.toString())
-        shade_position[msg.payload.snr] = {
-          position: msg.payload.position,
-          angle: msg.payload.angle
-        }
-        break
-      case 'wms-vb-scanned-devices':
-        console.log('Scanned devices.')
-        msg.payload.devices.forEach(element => registerDevice(element))
-        console.log(stickUsb.vnBlindsList())
-        break
-      default:
-        console.log('UNKNOWN MESSAGE: ' + JSON.stringify(msg));
+    console.log('Scanning for devices...');
+    try {
+      stickUsb.scanDevices({ autoAssignBlinds: false });
+    } catch (e) {
+      console.log(`scanDevices failed: ${e.message || e}`);
     }
   }
 }
 
-var client = mqtt.connect(
-  process.env.MQTT_SERVER,
-  {
-    username: process.env.MQTT_USER,
-    password: process.env.MQTT_PASSWORD,
-    will: {
-      topic: 'warema/bridge/state',
-      payload: 'offline',
-      retain: true
-    }
-  }
-)
+/** ============= MQTT ============= */
+const mqttClient = mqtt.connect(MQTT_SERVER, {
+  username: MQTT_USER || undefined,
+  password: MQTT_PASSWORD || undefined,
+  will: { topic: BRIDGE_AVAIL_TOPIC, payload: 'offline', retain: true },
+});
 
-var stickUsb
+mqttClient.on('connect', () => {
+  console.log('Connected to MQTT');
+  mqttClient.subscribe('warema/#');
+  mqttClient.subscribe('homeassistant/status');
+  mqttClient.publish(BRIDGE_AVAIL_TOPIC, 'online', { retain: true });
 
-client.on('connect', function (connack) {
-  console.log('Connected to MQTT')
-  client.subscribe('warema/#')
-  client.subscribe('homeassistant/status')
-  stickUsb = new warema(settingsPar.wmsSerialPort,
-    settingsPar.wmsChannel,
-    settingsPar.wmsPanid,
-    settingsPar.wmsKey,
+  stickUsb = new warema(
+    WMS_SERIAL_PORT,
+    WMS_CHANNEL,
+    WMS_PAN_ID,
+    WMS_KEY,
     {},
-    callback
+    stickCallback,
   );
-})
+});
 
-client.on('error', function (error) {
-  console.log('MQTT Error: ' + error.toString())
-})
+mqttClient.on('error', (err) => {
+  console.log(`MQTT Error: ${err && err.message ? err.message : String(err)}`);
+});
 
-client.on('message', function (topic, message) {
-//  console.log(topic + ':' + message.toString())
-  var scope = topic.split('/')[0]
-  if (scope == 'warema') {
-    var device = parseInt(topic.split('/')[1])
-    var command = topic.split('/')[2]
-    switch (command) {
-      case 'rain':
-      case 'wind':
-      case 'temperature':
-      case 'illuminance':
-	break
-      default:
-	console.log(topic + ':' + message.toString());
-	console.log('device: ' + device + ' === command: ' + command);
-    }
-    switch (command) {
-      case 'set':
-        switch (message.toString()) {
-          case 'CLOSE':
-            stickUsb.vnBlindSetPosition(device, 100, 0)
-            break;
-          case 'OPEN':
-            stickUsb.vnBlindSetPosition(device, 0, -100)
-            break;
-          case 'STOP':
-            stickUsb.vnBlindStop(device)
-            break;
-        }
-        break
-      case 'set_position':
-        stickUsb.vnBlindSetPosition(device, parseInt(message), parseInt(shade_position[device]['angle']))
-        break
-      case 'set_tilt':
-        stickUsb.vnBlindSetPosition(device, parseInt(shade_position[device]['position']), parseInt(message))
-        break
-      //default:
-      //  console.log('Unrecognised command from HA')
-    }
-  } else if (scope == 'homeassistant') {
-    if (topic.split('/')[1] == 'status' && message.toString() == 'online') {
-      registerDevices()
-    }
+/** ============= Stick Callback ============= */
+function stickCallback(err, msg) {
+  if (err) {
+    console.log(`ERROR: ${err}`);
+    return;
   }
-})
+  if (!msg) return;
+
+  switch (msg.topic) {
+    case 'wms-vb-init-completion':
+      console.log('Warema init completed');
+      setIntervals();
+      registerDevices();
+      break;
+    case 'wms-vb-scanned-devices':
+      if (msg.payload && Array.isArray(msg.payload.devices)) {
+        for (const element of msg.payload.devices) {
+          ensureDeviceRegistered({
+            snr: element.snr,
+            name: String(element.snr),
+            type: element.type,
+          });
+        }
+      }
+      break;
+    case 'wms-vb-rcv-weather-broadcast': {
+      if (!msg.payload || !msg.payload.weather) break;
+      const w = msg.payload.weather;
+      const snr = parseSnr(w.snr);
+      if (!snr || IGNORED_DEVICES.has(String(snr))) break;
+
+      announceWeatherSensors(snr);
+      mqttClient.publish(`warema/${snr}/illuminance/state`, String(w.lumen ?? ''), { retain: false });
+      mqttClient.publish(`warema/${snr}/temperature/state`, String(w.temp ?? ''), { retain: false });
+      mqttClient.publish(`warema/${snr}/wind/state`, String(w.wind ?? ''), { retain: false });
+      mqttClient.publish(`warema/${snr}/rain/state`, String(w.rain ?? ''), { retain: false });
+      break;
+    }
+    case 'wms-vb-blind-position-update': {
+      const snr = parseSnr(msg.payload && msg.payload.snr);
+      if (!snr || IGNORED_DEVICES.has(String(snr))) break;
+
+      if (!devices.has(snr)) {
+        ensureDeviceRegistered({ snr, name: String(snr), type: 25 });
+      }
+
+      const pos = Number.isFinite(parseInt(msg.payload.position, 10)) ? parseInt(msg.payload.position, 10) : 0;
+      const ang = Number.isFinite(parseInt(msg.payload.angle, 10)) ? parseInt(msg.payload.angle, 10) : 0;
+      positions.set(snr, { position: pos, angle: ang });
+      mqttClient.publish(`warema/${snr}/position`, String(pos), { retain: false });
+      mqttClient.publish(`warema/${snr}/tilt`, String(ang), { retain: false });
+      break;
+    }
+    case 'wms-vb-cmd-result-set-position':
+    case 'wms-vb-cmd-result-stop':
+      break;
+    default:
+      break;
+  }
+}
+
+/** ============= Incoming MQTT commands ============= */
+mqttClient.on('message', (topic, messageBuf) => {
+  const msgStr = messageBuf.toString();
+  const parts = topic.split('/');
+  const scope = parts[0];
+
+  if (scope === 'homeassistant') {
+    if (parts[1] === 'status' && msgStr === 'online') {
+      for (const d of devices.values()) publishDiscoveryForDevice(d);
+      for (const s of weatherAnnounced.values()) announceWeatherSensors(s);
+    }
+    return;
+  }
+
+  if (scope !== 'warema') return;
+  const snr = parseSnr(parts[1]);
+  const command = parts[2];
+  if (!snr || !command) return;
+
+  if (!['rain', 'wind', 'temperature', 'illuminance'].includes(command)) {
+    console.log(`${topic}:${msgStr}`);
+    console.log(`device: ${snr} === command: ${command}`);
+  }
+
+  if (!devices.has(snr)) {
+    ensureDeviceRegistered({ snr, name: String(snr), type: 25 });
+  }
+
+  const state = positions.get(snr);
+  const safePos = state && Number.isFinite(parseInt(state.position, 10)) ? parseInt(state.position, 10) : 0;
+  const safeAngle = state && Number.isFinite(parseInt(state.angle, 10)) ? parseInt(state.angle, 10) : 0;
+
+  switch (command) {
+    case 'set': {
+      const val = msgStr.toUpperCase();
+      if (val === 'CLOSE') {
+        stickUsb.vnBlindSetPosition(snr, 100, 0);
+      } else if (val === 'OPEN') {
+        stickUsb.vnBlindSetPosition(snr, 0, -100);
+      } else if (val === 'STOP') {
+        stickUsb.vnBlindStop(snr);
+      }
+      break;
+    }
+    case 'set_position': {
+      const target = parseInt(msgStr, 10);
+      const pos = Number.isFinite(target) ? target : safePos;
+      stickUsb.vnBlindSetPosition(snr, pos, safeAngle);
+      break;
+    }
+    case 'set_tilt': {
+      const target = parseInt(msgStr, 10);
+      const ang = Number.isFinite(target) ? target : safeAngle;
+      stickUsb.vnBlindSetPosition(snr, safePos, ang);
+      break;
+    }
+    default:
+      break;
+  }
+});
+
+process.on('SIGINT', () => process.exit(0));

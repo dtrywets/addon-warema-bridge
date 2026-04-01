@@ -11,6 +11,8 @@
   "hassio_api": true,
   "options": {
     "wms_serial_port": null,
+    "polling_interval": 30000,
+    "moving_interval": 1000,
     "mqtt": {
     "server": "mqtt://core-mosquitto:1883",
     "user": "addons",
@@ -22,6 +24,8 @@
     "wms_pan_id": "str?",
     "wms_channel": "int?",
     "wms_serial_port": "device(subsystem=tty)",
+    "polling_interval": "int?",
+    "moving_interval": "int?",
     "mqtt": {
     "server": "str?",
     "user": "str?",
