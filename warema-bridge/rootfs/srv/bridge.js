@@ -462,22 +462,32 @@ function setIntervals() {
     if (typeof stickUsb.setCmdConfirmationNotificationEnabled === 'function') {
       stickUsb.setCmdConfirmationNotificationEnabled(true);
     }
+    const hasType25 = [...devices.values()].some((d) => Number(d.type) === 25);
     if (typeof stickUsb.setPosUpdInterval === 'function') {
-      // Too-frequent position polling causes queue congestion and command jitter.
-      const effectivePollingInterval = (POLLING_INTERVAL > 0 && POLLING_INTERVAL < 90000) ? 90000 : POLLING_INTERVAL;
-      if (effectivePollingInterval !== POLLING_INTERVAL) {
-        console.log(`Polling interval ${POLLING_INTERVAL}ms too low, using ${effectivePollingInterval}ms for stability.`);
+      // Type-25 radio motors often do not answer blindGetPos reliably -> disable periodic polling.
+      if (hasType25) {
+        stickUsb.setPosUpdInterval(0);
+        console.log('Type-25 devices detected: disabled periodic position polling to avoid blindGetPos retry storms.');
+      } else {
+        const effectivePollingInterval = (POLLING_INTERVAL > 0 && POLLING_INTERVAL < 30000) ? 30000 : POLLING_INTERVAL;
+        if (effectivePollingInterval !== POLLING_INTERVAL) {
+          console.log(`Polling interval ${POLLING_INTERVAL}ms too low, using ${effectivePollingInterval}ms for stability.`);
+        }
+        stickUsb.setPosUpdInterval(effectivePollingInterval);
+        console.log(`Interval for position update set to ${Math.round(effectivePollingInterval / 1000)}s.`);
       }
-      stickUsb.setPosUpdInterval(effectivePollingInterval);
-      console.log(`Interval for position update set to ${Math.round(effectivePollingInterval / 1000)}s.`);
     }
     if (typeof stickUsb.setWatchMovingBlindsInterval === 'function') {
-      // Very low moving intervals produce queue congestion and oscillation.
-      const effectiveMovingInterval = (MOVING_INTERVAL > 0 && MOVING_INTERVAL < 5000) ? 5000 : MOVING_INTERVAL;
-      if (effectiveMovingInterval !== MOVING_INTERVAL) {
-        console.log(`Moving interval ${MOVING_INTERVAL}ms too low, using ${effectiveMovingInterval}ms for stability.`);
+      if (hasType25) {
+        stickUsb.setWatchMovingBlindsInterval(0);
+        console.log('Type-25 devices detected: disabled moving-blinds watcher to keep command queue clean.');
+      } else {
+        const effectiveMovingInterval = (MOVING_INTERVAL > 0 && MOVING_INTERVAL < 5000) ? 5000 : MOVING_INTERVAL;
+        if (effectiveMovingInterval !== MOVING_INTERVAL) {
+          console.log(`Moving interval ${MOVING_INTERVAL}ms too low, using ${effectiveMovingInterval}ms for stability.`);
+        }
+        stickUsb.setWatchMovingBlindsInterval(effectiveMovingInterval);
       }
-      stickUsb.setWatchMovingBlindsInterval(effectiveMovingInterval);
     }
   } catch (e) {
     console.log(`Failed to set intervals: ${e.message || e}`);

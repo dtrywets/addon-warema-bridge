@@ -179,7 +179,7 @@ patchFile(utilFile, [
   // Increase command timing to better match real-world radio latency.
   {
     search: 'case "blindGetPos"   : this.timeout =  500; this.delayAfter = 100; this.retry = 5; break;',
-    replacement: 'case "blindGetPos"   : this.timeout = 2000; this.delayAfter = 150; this.retry = 6; break;',
+    replacement: 'case "blindGetPos"   : this.timeout = 1500; this.delayAfter = 250; this.retry = 1; break;',
   },
   {
     search: 'case "blindMoveToPos": this.timeout =  500; this.delayAfter = 300; this.retry = 3; break;',
