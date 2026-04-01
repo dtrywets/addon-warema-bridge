@@ -176,6 +176,27 @@ patchFile(utilFile, [
     search: 'ret = new wmsMsgNew( msgType, snr, params );',
     replacement: 'var ret = new wmsMsgNew( msgType, snr, params );',
   },
+  // Increase command timing to better match real-world radio latency.
+  {
+    search: 'case "blindGetPos"   : this.timeout =  500; this.delayAfter = 100; this.retry = 5; break;',
+    replacement: 'case "blindGetPos"   : this.timeout = 2000; this.delayAfter = 150; this.retry = 6; break;',
+  },
+  {
+    search: 'case "blindMoveToPos": this.timeout =  500; this.delayAfter = 300; this.retry = 3; break;',
+    replacement: 'case "blindMoveToPos": this.timeout = 2000; this.delayAfter = 400; this.retry = 5; break;',
+  },
+  {
+    search: 'case "blindStopMove" : this.timeout =  200; this.delayAfter =   5; this.retry = 3; break;',
+    replacement: 'case "blindStopMove" : this.timeout = 1500; this.delayAfter = 100; this.retry = 5; break;',
+  },
+  {
+    search: 'case "waveRequest"   : this.timeout =  500; this.delayAfter = 300; break;',
+    replacement: 'case "waveRequest"   : this.timeout = 1500; this.delayAfter = 350; break;',
+  },
+  {
+    search: 'case "scanRequest"   : this.timeout =  750; break;',
+    replacement: 'case "scanRequest"   : this.timeout = 2000; break;',
+  },
 ]);
 
 console.log('warema-wms-api patching complete');

@@ -162,6 +162,29 @@ function callStickMethod(method, ...args) {
   }
 }
 
+function getDeviceType(snr) {
+  const dev = devices.get(snr);
+  return dev ? Number(dev.type) : null;
+}
+
+function deviceSupportsTilt(snr) {
+  // Type 25 (radio motor / awning) is operated as no-tilt cover.
+  return getDeviceType(snr) !== 25;
+}
+
+function normalizeAngleForDevice(snr, angle) {
+  if (!deviceSupportsTilt(snr)) return 0;
+  return angle;
+}
+
+function sendMoveCommand(snr, position, angle) {
+  // Some devices react more reliably when we send a wave request first.
+  callStickMethod('vnBlindWaveRequest', snr);
+  const normalizedAngle = normalizeAngleForDevice(snr, angle);
+  console.log(`Sending move command to ${snr}: position=${position} angle=${normalizedAngle}`);
+  return callStickMethod('vnBlindSetPosition', snr, position, normalizedAngle);
+}
+
 function buildSerialCandidates() {
   return uniqueNonEmpty([
     WMS_SERIAL_PORT,
@@ -187,6 +210,11 @@ function startStickOnPort(port) {
 function initStickWithBestPort() {
   const candidates = buildSerialCandidates();
   const fallback = candidates[0] || WMS_SERIAL_PORT;
+
+  if (WMS_PAN_ID !== 'FFFF') {
+    startStickOnPort(fallback);
+    return;
+  }
 
   if (typeof warema.listWmsStickSerialPorts !== 'function') {
     startStickOnPort(fallback);
@@ -395,6 +423,9 @@ function announceWeatherSensors(snr, force = false) {
 
 function setIntervals() {
   try {
+    if (typeof stickUsb.setCmdConfirmationNotificationEnabled === 'function') {
+      stickUsb.setCmdConfirmationNotificationEnabled(true);
+    }
     if (typeof stickUsb.setPosUpdInterval === 'function') {
       stickUsb.setPosUpdInterval(POLLING_INTERVAL);
       console.log(`Interval for position update set to ${Math.round(POLLING_INTERVAL / 1000)}s.`);
@@ -510,7 +541,10 @@ function stickCallback(err, msg) {
       break;
     }
     case 'wms-vb-cmd-result-set-position':
+      console.log(`WMS command result set-position: ${JSON.stringify(msg.payload)}`);
+      break;
     case 'wms-vb-cmd-result-stop':
+      console.log(`WMS command result stop: ${JSON.stringify(msg.payload)}`);
       break;
     default:
       break;
@@ -552,9 +586,9 @@ mqttClient.on('message', (topic, messageBuf) => {
     case 'set': {
       const val = msgStr.toUpperCase();
       if (val === 'CLOSE') {
-        callStickMethod('vnBlindSetPosition', snr, 100, 0);
+        sendMoveCommand(snr, 100, 0);
       } else if (val === 'OPEN') {
-        callStickMethod('vnBlindSetPosition', snr, 0, -100);
+        sendMoveCommand(snr, 0, -100);
       } else if (val === 'STOP') {
         callStickMethod('vnBlindStop', snr);
       }
@@ -563,13 +597,13 @@ mqttClient.on('message', (topic, messageBuf) => {
     case 'set_position': {
       const target = parseInt(msgStr, 10);
       const pos = Number.isFinite(target) ? target : safePos;
-      callStickMethod('vnBlindSetPosition', snr, pos, safeAngle);
+      sendMoveCommand(snr, pos, safeAngle);
       break;
     }
     case 'set_tilt': {
       const target = parseInt(msgStr, 10);
       const ang = Number.isFinite(target) ? target : safeAngle;
-      callStickMethod('vnBlindSetPosition', snr, safePos, ang);
+      sendMoveCommand(snr, safePos, ang);
       break;
     }
     default:
