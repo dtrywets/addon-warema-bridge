@@ -187,7 +187,7 @@ patchFile(utilFile, [
   },
   {
     search: 'case "blindStopMove" : this.timeout =  200; this.delayAfter =   5; this.retry = 3; break;',
-    replacement: 'case "blindStopMove" : this.timeout = 1500; this.delayAfter = 100; this.retry = 5; break;',
+    replacement: 'case "blindStopMove" : this.timeout = 1200; this.delayAfter = 100; this.retry = 1; break;',
   },
   {
     search: 'case "waveRequest"   : this.timeout =  500; this.delayAfter = 300; break;',

@@ -56,6 +56,7 @@ const POLLING_INTERVAL = Math.max(0, parseInt(env('POLLING_INTERVAL', '30000'), 
 const MOVING_INTERVAL = Math.max(0, parseInt(env('MOVING_INTERVAL', '1000'), 10) || 1000);
 const COMMAND_DEDUP_MS = Math.max(0, parseInt(env('COMMAND_DEDUP_MS', '5000'), 10) || 5000);
 const WAKE_COOLDOWN_MS = Math.max(0, parseInt(env('WAKE_COOLDOWN_MS', '30000'), 10) || 30000);
+const ENABLE_WAVE_BEFORE_MOVE = String(env('ENABLE_WAVE_BEFORE_MOVE', 'false')).toLowerCase() === 'true';
 
 // Device handling
 const IGNORED_DEVICES = new Set(
@@ -206,16 +207,17 @@ function sendMoveCommand(snr, position, angle) {
     }
   }
 
-  // Avoid flooding the queue with wave requests on bursty slider updates.
-  const lastWave = lastWaveByDevice.get(snr) || 0;
-  if ((now - lastWave) >= WAKE_COOLDOWN_MS) {
-    callStickMethod('vnBlindWaveRequest', snr);
-    lastWaveByDevice.set(snr, now);
+  // Some setups benefit from wave before move, but default off because
+  // it can add extra queue pressure on unstable links.
+  if (ENABLE_WAVE_BEFORE_MOVE) {
+    const lastWave = lastWaveByDevice.get(snr) || 0;
+    if ((now - lastWave) >= WAKE_COOLDOWN_MS) {
+      callStickMethod('vnBlindWaveRequest', snr);
+      lastWaveByDevice.set(snr, now);
+    }
   }
 
-  // Clear queued legacy commands before issuing a new target.
-  // This prevents old retried commands from fighting a newer target (oscillation).
-  callStickMethod('vnBlindStop', snr, false);
+  // Do not force STOP before every move: this can itself time out and block queue.
   console.log(`Sending move command to ${snr}: position=${position} angle=${normalizedAngle}`);
   const ok = callStickMethod('vnBlindSetPosition', snr, position, normalizedAngle);
   if (ok) {
