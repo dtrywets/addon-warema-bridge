@@ -54,8 +54,8 @@ const MQTT_PASSWORD = env('MQTT_PASSWORD', '');
 // Behavior
 const POLLING_INTERVAL = Math.max(0, parseInt(env('POLLING_INTERVAL', '30000'), 10) || 30000);
 const MOVING_INTERVAL = Math.max(0, parseInt(env('MOVING_INTERVAL', '1000'), 10) || 1000);
-const COMMAND_DEDUP_MS = Math.max(0, parseInt(env('COMMAND_DEDUP_MS', '2000'), 10) || 2000);
-const WAKE_COOLDOWN_MS = Math.max(0, parseInt(env('WAKE_COOLDOWN_MS', '10000'), 10) || 10000);
+const COMMAND_DEDUP_MS = Math.max(0, parseInt(env('COMMAND_DEDUP_MS', '5000'), 10) || 5000);
+const WAKE_COOLDOWN_MS = Math.max(0, parseInt(env('WAKE_COOLDOWN_MS', '30000'), 10) || 30000);
 
 // Device handling
 const IGNORED_DEVICES = new Set(
@@ -85,6 +85,7 @@ const positions = new Map();
 const weatherAnnounced = new Set();
 const recentCommands = new Map(); // SNR -> { key, ts }
 const lastWaveByDevice = new Map(); // SNR -> timestamp
+const lastMoveByDevice = new Map(); // SNR -> { ts, position, angle }
 
 /** ============= Helpers ============= */
 
@@ -193,17 +194,31 @@ function shouldDispatchCommand(snr, key) {
 }
 
 function sendMoveCommand(snr, position, angle) {
-  // Avoid flooding the queue with wave requests on bursty slider updates.
+  const normalizedAngle = normalizeAngleForDevice(snr, angle);
   const now = Date.now();
+  const prevMove = lastMoveByDevice.get(snr);
+  if (prevMove && (now - prevMove.ts) < 12000) {
+    const samePosition = Math.abs((prevMove.position ?? 0) - position) <= 2;
+    const sameAngle = Math.abs((prevMove.angle ?? 0) - normalizedAngle) <= 5;
+    if (samePosition && sameAngle) {
+      console.log(`Skipping near-duplicate move for ${snr}: position=${position} angle=${normalizedAngle}`);
+      return false;
+    }
+  }
+
+  // Avoid flooding the queue with wave requests on bursty slider updates.
   const lastWave = lastWaveByDevice.get(snr) || 0;
   if ((now - lastWave) >= WAKE_COOLDOWN_MS) {
     callStickMethod('vnBlindWaveRequest', snr);
     lastWaveByDevice.set(snr, now);
   }
 
-  const normalizedAngle = normalizeAngleForDevice(snr, angle);
   console.log(`Sending move command to ${snr}: position=${position} angle=${normalizedAngle}`);
-  return callStickMethod('vnBlindSetPosition', snr, position, normalizedAngle);
+  const ok = callStickMethod('vnBlindSetPosition', snr, position, normalizedAngle);
+  if (ok) {
+    lastMoveByDevice.set(snr, { ts: now, position, angle: normalizedAngle });
+  }
+  return ok;
 }
 
 function buildSerialCandidates() {
@@ -448,8 +463,13 @@ function setIntervals() {
       stickUsb.setCmdConfirmationNotificationEnabled(true);
     }
     if (typeof stickUsb.setPosUpdInterval === 'function') {
-      stickUsb.setPosUpdInterval(POLLING_INTERVAL);
-      console.log(`Interval for position update set to ${Math.round(POLLING_INTERVAL / 1000)}s.`);
+      // Too-frequent position polling causes queue congestion and command jitter.
+      const effectivePollingInterval = (POLLING_INTERVAL > 0 && POLLING_INTERVAL < 90000) ? 90000 : POLLING_INTERVAL;
+      if (effectivePollingInterval !== POLLING_INTERVAL) {
+        console.log(`Polling interval ${POLLING_INTERVAL}ms too low, using ${effectivePollingInterval}ms for stability.`);
+      }
+      stickUsb.setPosUpdInterval(effectivePollingInterval);
+      console.log(`Interval for position update set to ${Math.round(effectivePollingInterval / 1000)}s.`);
     }
     if (typeof stickUsb.setWatchMovingBlindsInterval === 'function') {
       // Very low moving intervals produce queue congestion and oscillation.
