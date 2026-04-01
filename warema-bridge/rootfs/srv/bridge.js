@@ -333,7 +333,9 @@ const mqttClient = mqtt.connect(MQTT_SERVER, {
 
 mqttClient.on('connect', () => {
   console.log('Connected to MQTT');
-  mqttClient.subscribe('warema/#');
+  mqttClient.subscribe('warema/+/set');
+  mqttClient.subscribe('warema/+/set_position');
+  mqttClient.subscribe('warema/+/set_tilt');
   mqttClient.subscribe('homeassistant/status');
   mqttClient.publish(BRIDGE_AVAIL_TOPIC, 'online', { retain: true });
 
@@ -432,11 +434,10 @@ mqttClient.on('message', (topic, messageBuf) => {
   const snr = parseSnr(parts[1]);
   const command = parts[2];
   if (!snr || !command) return;
+  if (!['set', 'set_position', 'set_tilt'].includes(command)) return;
 
-  if (!['rain', 'wind', 'temperature', 'illuminance'].includes(command)) {
-    console.log(`${topic}:${msgStr}`);
-    console.log(`device: ${snr} === command: ${command}`);
-  }
+  console.log(`${topic}:${msgStr}`);
+  console.log(`device: ${snr} === command: ${command}`);
 
   if (!devices.has(snr)) {
     ensureDeviceRegistered({ snr, name: String(snr), type: 25 });

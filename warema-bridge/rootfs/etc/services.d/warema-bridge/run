@@ -33,21 +33,23 @@ if bashio::config.has_value 'mqtt.password'; then
   export MQTT_PASSWORD
 fi
 
-# 3) Fallback/Auto-Discovery wie gehabt
-if ! bashio::services.available "mqtt" && ! bashio::config.exists 'mqtt.server'; then
-    bashio::exit.nok "No internal MQTT service found and no MQTT server defined."
-else
-    bashio::log.info "MQTT available, checking configuration ..."
-    if ! bashio::config.has_value 'mqtt.server'; then
-        bashio::log.info "No mqtt.server, attempting auto-discovery..."
-        MQTT_PREFIX="mqtt://"
-        if [ "$(bashio::services mqtt "ssl")" = true ]; then
-            MQTT_PREFIX="mqtts://"
-        fi
-        export MQTT_SERVER="${MQTT_PREFIX}$(bashio::services mqtt "host"):$(bashio::services mqtt "port")"
-        bashio::log.info "Discovered MQTT_SERVER=${MQTT_SERVER}"
+# 3) MQTT-Fallback nur dann über Supervisor-Services, wenn nicht explizit konfiguriert
+if ! bashio::config.has_value 'mqtt.server'; then
+    if ! bashio::services.available "mqtt"; then
+        bashio::exit.nok "No internal MQTT service found and no MQTT server defined."
     fi
-    if ! bashio::config.has_value 'mqtt.user'; then
+
+    bashio::log.info "No mqtt.server, attempting auto-discovery..."
+    MQTT_PREFIX="mqtt://"
+    if [ "$(bashio::services mqtt "ssl")" = true ]; then
+        MQTT_PREFIX="mqtts://"
+    fi
+    export MQTT_SERVER="${MQTT_PREFIX}$(bashio::services mqtt "host"):$(bashio::services mqtt "port")"
+    bashio::log.info "Discovered MQTT_SERVER=${MQTT_SERVER}"
+fi
+
+if ! bashio::config.has_value 'mqtt.user'; then
+    if bashio::services.available "mqtt"; then
         bashio::log.info "No mqtt.user, attempting auto-discovery..."
         export MQTT_USER=$(bashio::services mqtt "username")
         export MQTT_PASSWORD=$(bashio::services mqtt "password")

@@ -21,6 +21,11 @@ WORKDIR /srv
 # RUN npm ci
 RUN npm install
 
+# Patch warema-wms-api crash in timeout logger when vnBlindGet() returns undefined.
+# Without this guard, discovery mode can crash with:
+# "TypeError: Cannot read properties of undefined (reading 'name')"
+RUN node -e "const fs=require('fs');const f='/srv/node_modules/warema-wms-api/lib/wms-vb-stick.js';let s=fs.readFileSync(f,'utf8');const p='stickObj.vnBlindGet(stickObj.currentWmsMsg.snr).name';if(s.includes(p)){s=s.replaceAll(p,'((stickObj.vnBlindGet(stickObj.currentWmsMsg.snr)||{}).name||String(stickObj.currentWmsMsg.snr))');fs.writeFileSync(f,s);console.log('patched',f);}else{console.log('patch target not found, skipping');}"
+
 RUN apk del --no-cache --purge .build-deps && rm -rf /root/.npm /root/.cache
 
 COPY rootfs/ /
