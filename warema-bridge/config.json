@@ -1,6 +1,6 @@
 {
   "name": "Warema Bridge - dtry",
-  "version": "0.999",
+  "version": "1.000",
   "slug": "warema_bridge",
   "description": "Control Warema WMS system",
   "arch": ["aarch64", "amd64", "armv7", "i386"],
@@ -13,6 +13,7 @@
     "wms_serial_port": null,
     "polling_interval": 30000,
     "moving_interval": 1000,
+    "known_devices": [],
     "mqtt": {
     "server": "mqtt://core-mosquitto:1883",
     "user": "addons",
