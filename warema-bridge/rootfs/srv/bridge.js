@@ -213,6 +213,9 @@ function sendMoveCommand(snr, position, angle) {
     lastWaveByDevice.set(snr, now);
   }
 
+  // Clear queued legacy commands before issuing a new target.
+  // This prevents old retried commands from fighting a newer target (oscillation).
+  callStickMethod('vnBlindStop', snr, false);
   console.log(`Sending move command to ${snr}: position=${position} angle=${normalizedAngle}`);
   const ok = callStickMethod('vnBlindSetPosition', snr, position, normalizedAngle);
   if (ok) {
@@ -652,7 +655,7 @@ mqttClient.on('message', (topic, messageBuf) => {
       } else if (val === 'OPEN') {
         sendMoveCommand(snr, 0, -100);
       } else if (val === 'STOP') {
-        callStickMethod('vnBlindStop', snr);
+        callStickMethod('vnBlindStop', snr, false);
       }
       break;
     }

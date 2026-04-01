@@ -183,7 +183,7 @@ patchFile(utilFile, [
   },
   {
     search: 'case "blindMoveToPos": this.timeout =  500; this.delayAfter = 300; this.retry = 3; break;',
-    replacement: 'case "blindMoveToPos": this.timeout = 2000; this.delayAfter = 400; this.retry = 5; break;',
+    replacement: 'case "blindMoveToPos": this.timeout = 2000; this.delayAfter = 400; this.retry = -1; break;',
   },
   {
     search: 'case "blindStopMove" : this.timeout =  200; this.delayAfter =   5; this.retry = 3; break;',
