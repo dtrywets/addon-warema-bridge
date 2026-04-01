@@ -15,16 +15,15 @@ RUN \
 # Copy root filesystem
 # COPY rootfs/srv/package-lock.json /srv
 COPY rootfs/srv/package.json /srv
+COPY rootfs/srv/patch-warema-wms-api.js /srv
 
 WORKDIR /srv
 
 # RUN npm ci
 RUN npm install
 
-# Patch warema-wms-api crash in timeout logger when vnBlindGet() returns undefined.
-# Without this guard, discovery mode can crash with:
-# "TypeError: Cannot read properties of undefined (reading 'name')"
-RUN node -e "const fs=require('fs');const f='/srv/node_modules/warema-wms-api/lib/wms-vb-stick.js';let s=fs.readFileSync(f,'utf8');const p='stickObj.vnBlindGet(stickObj.currentWmsMsg.snr).name';if(s.includes(p)){s=s.replaceAll(p,'((stickObj.vnBlindGet(stickObj.currentWmsMsg.snr)||{}).name||String(stickObj.currentWmsMsg.snr))');fs.writeFileSync(f,s);console.log('patched',f);}else{console.log('patch target not found, skipping');}"
+# Patch warema-wms-api with deterministic hardening changes.
+RUN node /srv/patch-warema-wms-api.js
 
 RUN apk del --no-cache --purge .build-deps && rm -rf /root/.npm /root/.cache
 
