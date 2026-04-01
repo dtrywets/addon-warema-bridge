@@ -129,6 +129,10 @@ patchFile(usbFile, [
     search: 'this.status = "created";',
     replacement: 'stickObj.status = "created";',
   },
+  {
+    search: "log.E( portPath+' error: ', err.message)",
+    replacement: "log.E( `${portPath} error: ${err && err.message ? err.message : String(err)}` )",
+  },
 ]);
 
 patchFile(utilFile, [

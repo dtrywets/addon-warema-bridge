@@ -1,6 +1,7 @@
 // bridge.js — robust, defensive version
 'use strict';
 
+const fs = require('fs');
 const warema = require('warema-wms-api');
 const mqtt = require('mqtt');
 
@@ -101,6 +102,31 @@ function parseForcedDevices(list) {
   return out;
 }
 
+function listByIdCandidates() {
+  const dir = '/dev/serial/by-id';
+  try {
+    if (!fs.existsSync(dir)) return [];
+    const entries = fs.readdirSync(dir);
+    const out = [];
+    for (const entry of entries) {
+      const p = `${dir}/${entry}`;
+      out.push(p);
+      try {
+        out.push(fs.realpathSync(p));
+      } catch (_e) {
+        // Keep symlink path even if resolving fails.
+      }
+    }
+    return out;
+  } catch (_e) {
+    return [];
+  }
+}
+
+function uniqueNonEmpty(values) {
+  return [...new Set(values.filter((v) => typeof v === 'string' && v.trim().length > 0))];
+}
+
 function addBlindToStick(snr, name) {
   if (!stickUsb) return;
   const addFn = stickUsb.vnBlindAdd || stickUsb.addVnBlind;
@@ -133,6 +159,86 @@ function callStickMethod(method, ...args) {
   } catch (e) {
     console.log(`WMS command ${method} failed: ${e.message || e}`);
     return false;
+  }
+}
+
+function buildSerialCandidates() {
+  return uniqueNonEmpty([
+    WMS_SERIAL_PORT,
+    ...listByIdCandidates(),
+    '/dev/ttyUSB0',
+    '/dev/ttyACM0',
+    '/dev/ttyS1',
+  ]);
+}
+
+function startStickOnPort(port) {
+  console.log(`Starting WMS stick on serial port: ${port}`);
+  stickUsb = new warema(
+    port,
+    WMS_CHANNEL,
+    WMS_PAN_ID,
+    WMS_KEY,
+    {},
+    stickCallback,
+  );
+}
+
+function initStickWithBestPort() {
+  const candidates = buildSerialCandidates();
+  const fallback = candidates[0] || WMS_SERIAL_PORT;
+
+  if (typeof warema.listWmsStickSerialPorts !== 'function') {
+    startStickOnPort(fallback);
+    return;
+  }
+
+  let resolved = false;
+  const timeout = setTimeout(() => {
+    if (resolved) return;
+    resolved = true;
+    console.log(`WMS stick auto-detect timeout. Falling back to ${fallback}`);
+    startStickOnPort(fallback);
+  }, 2500);
+
+  try {
+    warema.listWmsStickSerialPorts((err, msg) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
+
+      const detected = uniqueNonEmpty(
+        ((msg && msg.payload && msg.payload.portsList) || []).map((p) => p.path),
+      );
+
+      if (detected.length === 0) {
+        if (err) {
+          console.log(`WMS stick auto-detect failed: ${err}`);
+        }
+        console.log(`No WMS serial port detected. Falling back to ${fallback}`);
+        startStickOnPort(fallback);
+        return;
+      }
+
+      // Prefer configured port if it was actually detected as a WMS stick.
+      if (detected.includes(WMS_SERIAL_PORT)) {
+        startStickOnPort(WMS_SERIAL_PORT);
+        return;
+      }
+
+      // Prefer any by-id path if available, otherwise first detected WMS stick.
+      const byId = detected.find((p) => p.startsWith('/dev/serial/by-id/'));
+      const selected = byId || detected[0];
+      console.log(`Configured port ${WMS_SERIAL_PORT} not detected as WMS stick. Auto-selected ${selected}`);
+      startStickOnPort(selected);
+    });
+  } catch (e) {
+    if (!resolved) {
+      resolved = true;
+      clearTimeout(timeout);
+      console.log(`WMS stick auto-detect exception: ${e.message || e}. Falling back to ${fallback}`);
+      startStickOnPort(fallback);
+    }
   }
 }
 
@@ -341,14 +447,7 @@ mqttClient.on('connect', () => {
 
   // Reconnect-safe: close old stick instance before creating a new one.
   closeStick();
-  stickUsb = new warema(
-    WMS_SERIAL_PORT,
-    WMS_CHANNEL,
-    WMS_PAN_ID,
-    WMS_KEY,
-    {},
-    stickCallback,
-  );
+  initStickWithBestPort();
 });
 
 mqttClient.on('error', (err) => {
