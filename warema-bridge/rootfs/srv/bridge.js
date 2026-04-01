@@ -13,6 +13,32 @@ const listEnv = (name) => {
   return v.split(',').map((s) => s.trim()).filter(Boolean);
 };
 
+function parseKnownDevices(raw) {
+  const text = (raw || '').trim();
+  if (!text) return [];
+
+  // Home Assistant can pass object-list options as JSON array or linewise JSON objects.
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed;
+  } catch (_e) {
+    // Fallback handled below.
+  }
+
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch (_e) {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
 // WMS
 const WMS_SERIAL_PORT = env('WMS_SERIAL_PORT', '/dev/ttyUSB0');
 const WMS_CHANNEL = parseInt(env('WMS_CHANNEL', '17'), 10);
@@ -29,8 +55,14 @@ const POLLING_INTERVAL = Math.max(0, parseInt(env('POLLING_INTERVAL', '30000'), 
 const MOVING_INTERVAL = Math.max(0, parseInt(env('MOVING_INTERVAL', '1000'), 10) || 1000);
 
 // Device handling
-const IGNORED_DEVICES = new Set(listEnv('IGNORED_DEVICES')); // SNR (decimal, no leading zeros)
+const IGNORED_DEVICES = new Set(
+  listEnv('IGNORED_DEVICES')
+    .map((entry) => parseSnr(entry))
+    .filter((snr) => Number.isFinite(snr))
+    .map((snr) => String(snr)),
+); // SNR normalized to decimal string
 const FORCE_DEVICES_RAW = listEnv('FORCE_DEVICES'); // Entries: "SNR" or "SNR:TYPE"
+const KNOWN_DEVICES = parseKnownDevices(env('KNOWN_DEVICES', ''));
 
 // Misc
 const HA_PREFIX = 'homeassistant';
@@ -78,6 +110,29 @@ function addBlindToStick(snr, name) {
     } catch (e) {
       console.log(`WMS addBlind failed for ${snr}: ${e.message || e}`);
     }
+  }
+}
+
+function closeStick() {
+  if (!stickUsb || typeof stickUsb.close !== 'function') return;
+  try {
+    stickUsb.close();
+  } catch (e) {
+    console.log(`WMS close failed: ${e.message || e}`);
+  }
+}
+
+function callStickMethod(method, ...args) {
+  if (!stickUsb || typeof stickUsb[method] !== 'function') {
+    console.log(`WMS command skipped: method ${method} not available yet.`);
+    return false;
+  }
+  try {
+    stickUsb[method](...args);
+    return true;
+  } catch (e) {
+    console.log(`WMS command ${method} failed: ${e.message || e}`);
+    return false;
   }
 }
 
@@ -182,8 +237,8 @@ function publishDiscoveryForDevice({ snr, name, type }) {
   mqttClient.publish(topic, JSON.stringify(payload), { retain: DISCOVERY_RETAIN });
 }
 
-function announceWeatherSensors(snr) {
-  if (weatherAnnounced.has(snr)) return;
+function announceWeatherSensors(snr, force = false) {
+  if (weatherAnnounced.has(snr) && !force) return;
   weatherAnnounced.add(snr);
 
   const availability = [
@@ -247,6 +302,13 @@ function setIntervals() {
 }
 
 function registerDevices() {
+  if (KNOWN_DEVICES.length > 0) {
+    for (const kd of KNOWN_DEVICES) {
+      ensureDeviceRegistered(kd);
+    }
+    return;
+  }
+
   const forced = parseForcedDevices(FORCE_DEVICES_RAW);
   if (forced.length > 0) {
     for (const fd of forced) {
@@ -271,10 +333,14 @@ const mqttClient = mqtt.connect(MQTT_SERVER, {
 
 mqttClient.on('connect', () => {
   console.log('Connected to MQTT');
-  mqttClient.subscribe('warema/#');
+  mqttClient.subscribe('warema/+/set');
+  mqttClient.subscribe('warema/+/set_position');
+  mqttClient.subscribe('warema/+/set_tilt');
   mqttClient.subscribe('homeassistant/status');
   mqttClient.publish(BRIDGE_AVAIL_TOPIC, 'online', { retain: true });
 
+  // Reconnect-safe: close old stick instance before creating a new one.
+  closeStick();
   stickUsb = new warema(
     WMS_SERIAL_PORT,
     WMS_CHANNEL,
@@ -359,7 +425,7 @@ mqttClient.on('message', (topic, messageBuf) => {
   if (scope === 'homeassistant') {
     if (parts[1] === 'status' && msgStr === 'online') {
       for (const d of devices.values()) publishDiscoveryForDevice(d);
-      for (const s of weatherAnnounced.values()) announceWeatherSensors(s);
+      for (const s of weatherAnnounced.values()) announceWeatherSensors(s, true);
     }
     return;
   }
@@ -368,11 +434,10 @@ mqttClient.on('message', (topic, messageBuf) => {
   const snr = parseSnr(parts[1]);
   const command = parts[2];
   if (!snr || !command) return;
+  if (!['set', 'set_position', 'set_tilt'].includes(command)) return;
 
-  if (!['rain', 'wind', 'temperature', 'illuminance'].includes(command)) {
-    console.log(`${topic}:${msgStr}`);
-    console.log(`device: ${snr} === command: ${command}`);
-  }
+  console.log(`${topic}:${msgStr}`);
+  console.log(`device: ${snr} === command: ${command}`);
 
   if (!devices.has(snr)) {
     ensureDeviceRegistered({ snr, name: String(snr), type: 25 });
@@ -386,24 +451,24 @@ mqttClient.on('message', (topic, messageBuf) => {
     case 'set': {
       const val = msgStr.toUpperCase();
       if (val === 'CLOSE') {
-        stickUsb.vnBlindSetPosition(snr, 100, 0);
+        callStickMethod('vnBlindSetPosition', snr, 100, 0);
       } else if (val === 'OPEN') {
-        stickUsb.vnBlindSetPosition(snr, 0, -100);
+        callStickMethod('vnBlindSetPosition', snr, 0, -100);
       } else if (val === 'STOP') {
-        stickUsb.vnBlindStop(snr);
+        callStickMethod('vnBlindStop', snr);
       }
       break;
     }
     case 'set_position': {
       const target = parseInt(msgStr, 10);
       const pos = Number.isFinite(target) ? target : safePos;
-      stickUsb.vnBlindSetPosition(snr, pos, safeAngle);
+      callStickMethod('vnBlindSetPosition', snr, pos, safeAngle);
       break;
     }
     case 'set_tilt': {
       const target = parseInt(msgStr, 10);
       const ang = Number.isFinite(target) ? target : safeAngle;
-      stickUsb.vnBlindSetPosition(snr, safePos, ang);
+      callStickMethod('vnBlindSetPosition', snr, safePos, ang);
       break;
     }
     default:
@@ -411,4 +476,7 @@ mqttClient.on('message', (topic, messageBuf) => {
   }
 });
 
-process.on('SIGINT', () => process.exit(0));
+process.on('SIGINT', () => {
+  closeStick();
+  process.exit(0);
+});

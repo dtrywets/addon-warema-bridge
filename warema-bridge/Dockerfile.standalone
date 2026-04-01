@@ -10,8 +10,10 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Node-Package installieren
 COPY rootfs/srv/package.json /srv
+COPY rootfs/srv/patch-warema-wms-api.js /srv
 WORKDIR /srv
 RUN npm install
+RUN node /srv/patch-warema-wms-api.js
 
 # Aufräumen
 RUN apk del --no-cache linux-headers g++ make && rm -rf /root/.npm /root/.cache

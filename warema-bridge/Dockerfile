@@ -15,11 +15,15 @@ RUN \
 # Copy root filesystem
 # COPY rootfs/srv/package-lock.json /srv
 COPY rootfs/srv/package.json /srv
+COPY rootfs/srv/patch-warema-wms-api.js /srv
 
 WORKDIR /srv
 
 # RUN npm ci
 RUN npm install
+
+# Patch warema-wms-api with deterministic hardening changes.
+RUN node /srv/patch-warema-wms-api.js
 
 RUN apk del --no-cache --purge .build-deps && rm -rf /root/.npm /root/.cache
 
