@@ -462,7 +462,8 @@ function setIntervals() {
     if (typeof stickUsb.setCmdConfirmationNotificationEnabled === 'function') {
       stickUsb.setCmdConfirmationNotificationEnabled(true);
     }
-    const hasType25 = [...devices.values()].some((d) => Number(d.type) === 25);
+    // If device list is still unknown (early startup), default to conservative mode.
+    const hasType25 = (devices.size === 0) || [...devices.values()].some((d) => Number(d.type) === 25);
     if (typeof stickUsb.setPosUpdInterval === 'function') {
       // Type-25 radio motors often do not answer blindGetPos reliably -> disable periodic polling.
       if (hasType25) {
@@ -499,6 +500,7 @@ function registerDevices() {
     for (const kd of KNOWN_DEVICES) {
       ensureDeviceRegistered(kd);
     }
+    setIntervals();
     return;
   }
 
@@ -507,6 +509,7 @@ function registerDevices() {
     for (const fd of forced) {
       ensureDeviceRegistered(fd);
     }
+    setIntervals();
   } else {
     console.log('Scanning for devices...');
     try {
@@ -552,8 +555,8 @@ function stickCallback(err, msg) {
   switch (msg.topic) {
     case 'wms-vb-init-completion':
       console.log('Warema init completed');
-      setIntervals();
       registerDevices();
+      setIntervals();
       break;
     case 'wms-vb-scanned-devices':
       if (msg.payload && Array.isArray(msg.payload.devices)) {
@@ -564,6 +567,8 @@ function stickCallback(err, msg) {
             type: element.type,
           });
         }
+        // Re-apply interval strategy now that concrete device types are known.
+        setIntervals();
       }
       break;
     case 'wms-vb-rcv-weather-broadcast': {
