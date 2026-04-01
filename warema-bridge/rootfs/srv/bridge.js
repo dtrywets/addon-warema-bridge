@@ -55,7 +55,12 @@ const POLLING_INTERVAL = Math.max(0, parseInt(env('POLLING_INTERVAL', '30000'), 
 const MOVING_INTERVAL = Math.max(0, parseInt(env('MOVING_INTERVAL', '1000'), 10) || 1000);
 
 // Device handling
-const IGNORED_DEVICES = new Set(listEnv('IGNORED_DEVICES')); // SNR (decimal, no leading zeros)
+const IGNORED_DEVICES = new Set(
+  listEnv('IGNORED_DEVICES')
+    .map((entry) => parseSnr(entry))
+    .filter((snr) => Number.isFinite(snr))
+    .map((snr) => String(snr)),
+); // SNR normalized to decimal string
 const FORCE_DEVICES_RAW = listEnv('FORCE_DEVICES'); // Entries: "SNR" or "SNR:TYPE"
 const KNOWN_DEVICES = parseKnownDevices(env('KNOWN_DEVICES', ''));
 
@@ -105,6 +110,29 @@ function addBlindToStick(snr, name) {
     } catch (e) {
       console.log(`WMS addBlind failed for ${snr}: ${e.message || e}`);
     }
+  }
+}
+
+function closeStick() {
+  if (!stickUsb || typeof stickUsb.close !== 'function') return;
+  try {
+    stickUsb.close();
+  } catch (e) {
+    console.log(`WMS close failed: ${e.message || e}`);
+  }
+}
+
+function callStickMethod(method, ...args) {
+  if (!stickUsb || typeof stickUsb[method] !== 'function') {
+    console.log(`WMS command skipped: method ${method} not available yet.`);
+    return false;
+  }
+  try {
+    stickUsb[method](...args);
+    return true;
+  } catch (e) {
+    console.log(`WMS command ${method} failed: ${e.message || e}`);
+    return false;
   }
 }
 
@@ -209,8 +237,8 @@ function publishDiscoveryForDevice({ snr, name, type }) {
   mqttClient.publish(topic, JSON.stringify(payload), { retain: DISCOVERY_RETAIN });
 }
 
-function announceWeatherSensors(snr) {
-  if (weatherAnnounced.has(snr)) return;
+function announceWeatherSensors(snr, force = false) {
+  if (weatherAnnounced.has(snr) && !force) return;
   weatherAnnounced.add(snr);
 
   const availability = [
@@ -309,6 +337,8 @@ mqttClient.on('connect', () => {
   mqttClient.subscribe('homeassistant/status');
   mqttClient.publish(BRIDGE_AVAIL_TOPIC, 'online', { retain: true });
 
+  // Reconnect-safe: close old stick instance before creating a new one.
+  closeStick();
   stickUsb = new warema(
     WMS_SERIAL_PORT,
     WMS_CHANNEL,
@@ -393,7 +423,7 @@ mqttClient.on('message', (topic, messageBuf) => {
   if (scope === 'homeassistant') {
     if (parts[1] === 'status' && msgStr === 'online') {
       for (const d of devices.values()) publishDiscoveryForDevice(d);
-      for (const s of weatherAnnounced.values()) announceWeatherSensors(s);
+      for (const s of weatherAnnounced.values()) announceWeatherSensors(s, true);
     }
     return;
   }
@@ -420,24 +450,24 @@ mqttClient.on('message', (topic, messageBuf) => {
     case 'set': {
       const val = msgStr.toUpperCase();
       if (val === 'CLOSE') {
-        stickUsb.vnBlindSetPosition(snr, 100, 0);
+        callStickMethod('vnBlindSetPosition', snr, 100, 0);
       } else if (val === 'OPEN') {
-        stickUsb.vnBlindSetPosition(snr, 0, -100);
+        callStickMethod('vnBlindSetPosition', snr, 0, -100);
       } else if (val === 'STOP') {
-        stickUsb.vnBlindStop(snr);
+        callStickMethod('vnBlindStop', snr);
       }
       break;
     }
     case 'set_position': {
       const target = parseInt(msgStr, 10);
       const pos = Number.isFinite(target) ? target : safePos;
-      stickUsb.vnBlindSetPosition(snr, pos, safeAngle);
+      callStickMethod('vnBlindSetPosition', snr, pos, safeAngle);
       break;
     }
     case 'set_tilt': {
       const target = parseInt(msgStr, 10);
       const ang = Number.isFinite(target) ? target : safeAngle;
-      stickUsb.vnBlindSetPosition(snr, safePos, ang);
+      callStickMethod('vnBlindSetPosition', snr, safePos, ang);
       break;
     }
     default:
@@ -445,4 +475,7 @@ mqttClient.on('message', (topic, messageBuf) => {
   }
 });
 
-process.on('SIGINT', () => process.exit(0));
+process.on('SIGINT', () => {
+  closeStick();
+  process.exit(0);
+});
