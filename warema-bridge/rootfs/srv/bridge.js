@@ -386,6 +386,7 @@ function stickCallback(err, msg) {
       const snr = parseSnr(w.snr);
       if (!snr || IGNORED_DEVICES.has(String(snr))) break;
 
+      console.log(`WMS weather broadcast from ${snr}: temp=${w.temp} wind=${w.wind} rain=${w.rain} lumen=${w.lumen}`);
       announceWeatherSensors(snr);
       mqttClient.publish(`warema/${snr}/illuminance/state`, String(w.lumen ?? ''), { retain: false });
       mqttClient.publish(`warema/${snr}/temperature/state`, String(w.temp ?? ''), { retain: false });
@@ -403,6 +404,7 @@ function stickCallback(err, msg) {
 
       const pos = Number.isFinite(parseInt(msg.payload.position, 10)) ? parseInt(msg.payload.position, 10) : 0;
       const ang = Number.isFinite(parseInt(msg.payload.angle, 10)) ? parseInt(msg.payload.angle, 10) : 0;
+      console.log(`WMS remote update ${snr}: position=${pos} tilt=${ang}`);
       positions.set(snr, { position: pos, angle: ang });
       mqttClient.publish(`warema/${snr}/position`, String(pos), { retain: false });
       mqttClient.publish(`warema/${snr}/tilt`, String(ang), { retain: false });
