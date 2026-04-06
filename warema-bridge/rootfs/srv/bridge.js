@@ -57,8 +57,9 @@ const MOVING_INTERVAL = Math.max(0, parseInt(env('MOVING_INTERVAL', '1000'), 10)
 const COMMAND_DEDUP_MS = Math.max(0, parseInt(env('COMMAND_DEDUP_MS', '5000'), 10) || 5000);
 const WAKE_COOLDOWN_MS = Math.max(0, parseInt(env('WAKE_COOLDOWN_MS', '30000'), 10) || 30000);
 const ENABLE_WAVE_BEFORE_MOVE = String(env('ENABLE_WAVE_BEFORE_MOVE', 'false')).toLowerCase() === 'true';
-const SET_POSITION_DEBOUNCE_MS = Math.max(0, parseInt(env('SET_POSITION_DEBOUNCE_MS', '900'), 10) || 900);
+const SET_POSITION_DEBOUNCE_MS = Math.max(0, parseInt(env('SET_POSITION_DEBOUNCE_MS', '1800'), 10) || 1800);
 const POSITION_PROBE_DELAY_MS = Math.max(0, parseInt(env('POSITION_PROBE_DELAY_MS', '7000'), 10) || 7000);
+const MOVE_COOLDOWN_MS = Math.max(0, parseInt(env('MOVE_COOLDOWN_MS', '4500'), 10) || 4500);
 
 // Device handling
 const IGNORED_DEVICES = new Set(
@@ -92,6 +93,7 @@ const lastMoveByDevice = new Map(); // SNR -> { ts, position, angle }
 const pendingMoveTimers = new Map(); // SNR -> timeout handle
 const pendingMoveTargets = new Map(); // SNR -> { position, angle }
 const probeTimers = new Map(); // SNR -> timeout handle
+const moveInFlightUntil = new Map(); // SNR -> timestamp
 
 /** ============= Helpers ============= */
 
@@ -226,6 +228,12 @@ function schedulePositionProbe(snr, delayMs = POSITION_PROBE_DELAY_MS) {
 function sendMoveCommand(snr, position, angle) {
   const normalizedAngle = normalizeAngleForDevice(snr, angle);
   const now = Date.now();
+  const inflightUntil = moveInFlightUntil.get(snr) || 0;
+  if (now < inflightUntil) {
+    // Command still in flight: coalesce to last target.
+    pendingMoveTargets.set(snr, { position, angle: normalizedAngle });
+    return false;
+  }
   const prevMove = lastMoveByDevice.get(snr);
   if (prevMove && (now - prevMove.ts) < 12000) {
     const samePosition = Math.abs((prevMove.position ?? 0) - position) <= 2;
@@ -251,6 +259,7 @@ function sendMoveCommand(snr, position, angle) {
   const ok = callStickMethod('vnBlindSetPosition', snr, position, normalizedAngle);
   if (ok) {
     lastMoveByDevice.set(snr, { ts: now, position, angle: normalizedAngle });
+    moveInFlightUntil.set(snr, now + MOVE_COOLDOWN_MS);
     positions.set(snr, { position, angle: normalizedAngle });
     publishPositionState(snr, position, normalizedAngle);
     schedulePositionProbe(snr);
@@ -268,10 +277,23 @@ function queueSetPositionCommand(snr, position, angle) {
     const target = pendingMoveTargets.get(snr);
     pendingMoveTargets.delete(snr);
     if (!target) return;
+    // If the queue is still busy with prior command processing, postpone once.
+    if (isMoveBusy(snr)) {
+      pendingMoveTargets.set(snr, target);
+      queueSetPositionCommand(snr, target.position, target.angle);
+      return;
+    }
     sendMoveCommand(snr, target.position, target.angle);
   }, SET_POSITION_DEBOUNCE_MS);
 
   pendingMoveTimers.set(snr, timer);
+}
+
+function drainPendingMoveIfAny(snr) {
+  const target = pendingMoveTargets.get(snr);
+  if (!target) return;
+  pendingMoveTargets.delete(snr);
+  sendMoveCommand(snr, target.position, target.angle);
 }
 
 function buildSerialCandidates() {
@@ -664,6 +686,8 @@ function stickCallback(err, msg) {
           const normalizedAngle = Number.isFinite(ang) ? ang : 0;
           positions.set(snr, { position: pos, angle: normalizedAngle });
           publishPositionState(snr, pos, normalizedAngle);
+          moveInFlightUntil.set(snr, 0);
+          drainPendingMoveIfAny(snr);
           schedulePositionProbe(snr);
         }
       }
@@ -672,7 +696,11 @@ function stickCallback(err, msg) {
       console.log(`WMS command result stop: ${JSON.stringify(msg.payload)}`);
       if (msg.payload) {
         const snr = parseSnr(msg.payload.snr);
-        if (snr) schedulePositionProbe(snr, 4000);
+        if (snr) {
+          moveInFlightUntil.set(snr, 0);
+          drainPendingMoveIfAny(snr);
+          schedulePositionProbe(snr, 4000);
+        }
       }
       break;
     default:
