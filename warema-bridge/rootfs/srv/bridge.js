@@ -209,6 +209,12 @@ function clearTimerFor(map, snr) {
   }
 }
 
+function isMoveBusy(snr) {
+  const inflightUntil = moveInFlightUntil.get(snr) || 0;
+  if (Date.now() < inflightUntil) return true;
+  return pendingMoveTimers.has(snr);
+}
+
 function publishPositionState(snr, position, angle) {
   mqttClient.publish(`warema/${snr}/position`, String(position), { retain: false });
   mqttClient.publish(`warema/${snr}/tilt`, String(angle), { retain: false });
