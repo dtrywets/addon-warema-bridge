@@ -57,6 +57,8 @@ const MOVING_INTERVAL = Math.max(0, parseInt(env('MOVING_INTERVAL', '1000'), 10)
 const COMMAND_DEDUP_MS = Math.max(0, parseInt(env('COMMAND_DEDUP_MS', '5000'), 10) || 5000);
 const WAKE_COOLDOWN_MS = Math.max(0, parseInt(env('WAKE_COOLDOWN_MS', '30000'), 10) || 30000);
 const ENABLE_WAVE_BEFORE_MOVE = String(env('ENABLE_WAVE_BEFORE_MOVE', 'false')).toLowerCase() === 'true';
+const SET_POSITION_DEBOUNCE_MS = Math.max(0, parseInt(env('SET_POSITION_DEBOUNCE_MS', '900'), 10) || 900);
+const POSITION_PROBE_DELAY_MS = Math.max(0, parseInt(env('POSITION_PROBE_DELAY_MS', '7000'), 10) || 7000);
 
 // Device handling
 const IGNORED_DEVICES = new Set(
@@ -87,6 +89,9 @@ const weatherAnnounced = new Set();
 const recentCommands = new Map(); // SNR -> { key, ts }
 const lastWaveByDevice = new Map(); // SNR -> timestamp
 const lastMoveByDevice = new Map(); // SNR -> { ts, position, angle }
+const pendingMoveTimers = new Map(); // SNR -> timeout handle
+const pendingMoveTargets = new Map(); // SNR -> { position, angle }
+const probeTimers = new Map(); // SNR -> timeout handle
 
 /** ============= Helpers ============= */
 
@@ -194,6 +199,30 @@ function shouldDispatchCommand(snr, key) {
   return true;
 }
 
+function clearTimerFor(map, snr) {
+  const timer = map.get(snr);
+  if (timer) {
+    clearTimeout(timer);
+    map.delete(snr);
+  }
+}
+
+function publishPositionState(snr, position, angle) {
+  mqttClient.publish(`warema/${snr}/position`, String(position), { retain: false });
+  mqttClient.publish(`warema/${snr}/tilt`, String(angle), { retain: false });
+}
+
+function schedulePositionProbe(snr, delayMs = POSITION_PROBE_DELAY_MS) {
+  if (delayMs <= 0) return;
+  clearTimerFor(probeTimers, snr);
+  const timer = setTimeout(() => {
+    probeTimers.delete(snr);
+    // Single-shot probe only, otherwise we end up in blindGetPos storms again.
+    callStickMethod('vnBlindGetPosition', snr, { cmdConfirmation: false, callbackOnUnchangedPos: true });
+  }, delayMs);
+  probeTimers.set(snr, timer);
+}
+
 function sendMoveCommand(snr, position, angle) {
   const normalizedAngle = normalizeAngleForDevice(snr, angle);
   const now = Date.now();
@@ -222,8 +251,27 @@ function sendMoveCommand(snr, position, angle) {
   const ok = callStickMethod('vnBlindSetPosition', snr, position, normalizedAngle);
   if (ok) {
     lastMoveByDevice.set(snr, { ts: now, position, angle: normalizedAngle });
+    positions.set(snr, { position, angle: normalizedAngle });
+    publishPositionState(snr, position, normalizedAngle);
+    schedulePositionProbe(snr);
   }
   return ok;
+}
+
+function queueSetPositionCommand(snr, position, angle) {
+  const normalizedAngle = normalizeAngleForDevice(snr, angle);
+  pendingMoveTargets.set(snr, { position, angle: normalizedAngle });
+  clearTimerFor(pendingMoveTimers, snr);
+
+  const timer = setTimeout(() => {
+    pendingMoveTimers.delete(snr);
+    const target = pendingMoveTargets.get(snr);
+    pendingMoveTargets.delete(snr);
+    if (!target) return;
+    sendMoveCommand(snr, target.position, target.angle);
+  }, SET_POSITION_DEBOUNCE_MS);
+
+  pendingMoveTimers.set(snr, timer);
 }
 
 function buildSerialCandidates() {
@@ -602,15 +650,30 @@ function stickCallback(err, msg) {
       const ang = Number.isFinite(parseInt(msg.payload.angle, 10)) ? parseInt(msg.payload.angle, 10) : 0;
       console.log(`WMS remote update ${snr}: position=${pos} tilt=${ang}`);
       positions.set(snr, { position: pos, angle: ang });
-      mqttClient.publish(`warema/${snr}/position`, String(pos), { retain: false });
-      mqttClient.publish(`warema/${snr}/tilt`, String(ang), { retain: false });
+      publishPositionState(snr, pos, ang);
+      clearTimerFor(probeTimers, snr);
       break;
     }
     case 'wms-vb-cmd-result-set-position':
       console.log(`WMS command result set-position: ${JSON.stringify(msg.payload)}`);
+      if (msg.payload) {
+        const snr = parseSnr(msg.payload.snr);
+        const pos = parseInt(msg.payload.position, 10);
+        const ang = parseInt(msg.payload.angle, 10);
+        if (snr && Number.isFinite(pos)) {
+          const normalizedAngle = Number.isFinite(ang) ? ang : 0;
+          positions.set(snr, { position: pos, angle: normalizedAngle });
+          publishPositionState(snr, pos, normalizedAngle);
+          schedulePositionProbe(snr);
+        }
+      }
       break;
     case 'wms-vb-cmd-result-stop':
       console.log(`WMS command result stop: ${JSON.stringify(msg.payload)}`);
+      if (msg.payload) {
+        const snr = parseSnr(msg.payload.snr);
+        if (snr) schedulePositionProbe(snr, 4000);
+      }
       break;
     default:
       break;
@@ -657,7 +720,10 @@ mqttClient.on('message', (topic, messageBuf) => {
       } else if (val === 'OPEN') {
         sendMoveCommand(snr, 0, -100);
       } else if (val === 'STOP') {
+        clearTimerFor(pendingMoveTimers, snr);
+        pendingMoveTargets.delete(snr);
         callStickMethod('vnBlindStop', snr, false);
+        schedulePositionProbe(snr, 4000);
       }
       break;
     }
@@ -665,7 +731,7 @@ mqttClient.on('message', (topic, messageBuf) => {
       const target = parseInt(msgStr, 10);
       const pos = Number.isFinite(target) ? target : safePos;
       if (!shouldDispatchCommand(snr, `set_position:${pos}`)) break;
-      sendMoveCommand(snr, pos, safeAngle);
+      queueSetPositionCommand(snr, pos, safeAngle);
       break;
     }
     case 'set_tilt': {
@@ -681,6 +747,8 @@ mqttClient.on('message', (topic, messageBuf) => {
 });
 
 process.on('SIGINT', () => {
+  for (const timer of pendingMoveTimers.values()) clearTimeout(timer);
+  for (const timer of probeTimers.values()) clearTimeout(timer);
   closeStick();
   process.exit(0);
 });
