@@ -60,6 +60,9 @@ const ENABLE_WAVE_BEFORE_MOVE = String(env('ENABLE_WAVE_BEFORE_MOVE', 'false')).
 const SET_POSITION_DEBOUNCE_MS = Math.max(0, parseInt(env('SET_POSITION_DEBOUNCE_MS', '1800'), 10) || 1800);
 const POSITION_PROBE_DELAY_MS = Math.max(0, parseInt(env('POSITION_PROBE_DELAY_MS', '7000'), 10) || 7000);
 const MOVE_COOLDOWN_MS = Math.max(0, parseInt(env('MOVE_COOLDOWN_MS', '4500'), 10) || 4500);
+const TRACKING_INITIAL_DELAY_MS = Math.max(200, parseInt(env('TRACKING_INITIAL_DELAY_MS', '1200'), 10) || 1200);
+const TRACKING_INTERVAL_MS = Math.max(500, parseInt(env('TRACKING_INTERVAL_MS', '3000'), 10) || 3000);
+const TRACKING_MAX_PROBES = Math.max(1, parseInt(env('TRACKING_MAX_PROBES', '4'), 10) || 4);
 
 // Device handling
 const IGNORED_DEVICES = new Set(
@@ -94,6 +97,8 @@ const pendingMoveTimers = new Map(); // SNR -> timeout handle
 const pendingMoveTargets = new Map(); // SNR -> { position, angle }
 const probeTimers = new Map(); // SNR -> timeout handle
 const moveInFlightUntil = new Map(); // SNR -> timestamp
+const trackingTimers = new Map(); // SNR -> timeout handle
+const trackingState = new Map(); // SNR -> { remaining:Number, expectedPosition:Number|null }
 
 /** ============= Helpers ============= */
 
@@ -231,6 +236,46 @@ function schedulePositionProbe(snr, delayMs = POSITION_PROBE_DELAY_MS) {
   probeTimers.set(snr, timer);
 }
 
+function clearPositionTracking(snr) {
+  clearTimerFor(trackingTimers, snr);
+  trackingState.delete(snr);
+}
+
+function scheduleTrackingProbe(snr, delayMs) {
+  const timer = setTimeout(() => {
+    trackingTimers.delete(snr);
+    const state = trackingState.get(snr);
+    if (!state) return;
+
+    const current = positions.get(snr);
+    if (state.expectedPosition !== null && current && Number.isFinite(current.position)) {
+      if (Math.abs(current.position - state.expectedPosition) <= 3) {
+        trackingState.delete(snr);
+        return;
+      }
+    }
+
+    callStickMethod('vnBlindGetPosition', snr, { cmdConfirmation: false, callbackOnUnchangedPos: true });
+    state.remaining -= 1;
+    if (state.remaining <= 0) {
+      trackingState.delete(snr);
+      return;
+    }
+    scheduleTrackingProbe(snr, TRACKING_INTERVAL_MS);
+  }, delayMs);
+  trackingTimers.set(snr, timer);
+}
+
+function startPositionTracking(snr, expectedPosition = null) {
+  clearPositionTracking(snr);
+  clearTimerFor(probeTimers, snr);
+  trackingState.set(snr, {
+    remaining: TRACKING_MAX_PROBES,
+    expectedPosition: Number.isFinite(expectedPosition) ? expectedPosition : null,
+  });
+  scheduleTrackingProbe(snr, TRACKING_INITIAL_DELAY_MS);
+}
+
 function sendMoveCommand(snr, position, angle) {
   const normalizedAngle = normalizeAngleForDevice(snr, angle);
   const now = Date.now();
@@ -266,9 +311,7 @@ function sendMoveCommand(snr, position, angle) {
   if (ok) {
     lastMoveByDevice.set(snr, { ts: now, position, angle: normalizedAngle });
     moveInFlightUntil.set(snr, now + MOVE_COOLDOWN_MS);
-    positions.set(snr, { position, angle: normalizedAngle });
-    publishPositionState(snr, position, normalizedAngle);
-    schedulePositionProbe(snr);
+    startPositionTracking(snr, position);
   }
   return ok;
 }
@@ -680,6 +723,10 @@ function stickCallback(err, msg) {
       positions.set(snr, { position: pos, angle: ang });
       publishPositionState(snr, pos, ang);
       clearTimerFor(probeTimers, snr);
+      const state = trackingState.get(snr);
+      if (state && state.expectedPosition !== null && Math.abs(pos - state.expectedPosition) <= 3) {
+        clearPositionTracking(snr);
+      }
       break;
     }
     case 'wms-vb-cmd-result-set-position':
@@ -687,14 +734,10 @@ function stickCallback(err, msg) {
       if (msg.payload) {
         const snr = parseSnr(msg.payload.snr);
         const pos = parseInt(msg.payload.position, 10);
-        const ang = parseInt(msg.payload.angle, 10);
-        if (snr && Number.isFinite(pos)) {
-          const normalizedAngle = Number.isFinite(ang) ? ang : 0;
-          positions.set(snr, { position: pos, angle: normalizedAngle });
-          publishPositionState(snr, pos, normalizedAngle);
+        if (snr) {
           moveInFlightUntil.set(snr, 0);
+          startPositionTracking(snr, Number.isFinite(pos) ? pos : null);
           drainPendingMoveIfAny(snr);
-          schedulePositionProbe(snr);
         }
       }
       break;
@@ -704,6 +747,7 @@ function stickCallback(err, msg) {
         const snr = parseSnr(msg.payload.snr);
         if (snr) {
           moveInFlightUntil.set(snr, 0);
+          clearPositionTracking(snr);
           drainPendingMoveIfAny(snr);
           schedulePositionProbe(snr, 4000);
         }
@@ -756,6 +800,7 @@ mqttClient.on('message', (topic, messageBuf) => {
       } else if (val === 'STOP') {
         clearTimerFor(pendingMoveTimers, snr);
         pendingMoveTargets.delete(snr);
+        clearPositionTracking(snr);
         callStickMethod('vnBlindStop', snr, false);
         schedulePositionProbe(snr, 4000);
       }
@@ -783,6 +828,7 @@ mqttClient.on('message', (topic, messageBuf) => {
 process.on('SIGINT', () => {
   for (const timer of pendingMoveTimers.values()) clearTimeout(timer);
   for (const timer of probeTimers.values()) clearTimeout(timer);
+  for (const timer of trackingTimers.values()) clearTimeout(timer);
   closeStick();
   process.exit(0);
 });
