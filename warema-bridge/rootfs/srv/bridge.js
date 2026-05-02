@@ -6,7 +6,7 @@ const warema = require('warema-wms-api');
 const mqtt = require('mqtt');
 
 /** ============= ENV & Defaults ============= */
-const env = (name, def) => (process.env[name] ?? def);
+const env = (name, def) => ((process.env[name] !== undefined) ? process.env[name] : def);
 
 const listEnv = (name) => {
   const v = env(name, '').trim();
@@ -287,8 +287,8 @@ function sendMoveCommand(snr, position, angle) {
   }
   const prevMove = lastMoveByDevice.get(snr);
   if (prevMove && (now - prevMove.ts) < 12000) {
-    const samePosition = Math.abs((prevMove.position ?? 0) - position) <= 2;
-    const sameAngle = Math.abs((prevMove.angle ?? 0) - normalizedAngle) <= 5;
+    const samePosition = Math.abs(((prevMove.position !== undefined) ? prevMove.position : 0) - position) <= 2;
+    const sameAngle = Math.abs(((prevMove.angle !== undefined) ? prevMove.angle : 0) - normalizedAngle) <= 5;
     if (samePosition && sameAngle) {
       console.log(`Skipping near-duplicate move for ${snr}: position=${position} angle=${normalizedAngle}`);
       return false;
@@ -703,10 +703,10 @@ function stickCallback(err, msg) {
 
       console.log(`WMS weather broadcast from ${snr}: temp=${w.temp} wind=${w.wind} rain=${w.rain} lumen=${w.lumen}`);
       announceWeatherSensors(snr);
-      mqttClient.publish(`warema/${snr}/illuminance/state`, String(w.lumen ?? ''), { retain: false });
-      mqttClient.publish(`warema/${snr}/temperature/state`, String(w.temp ?? ''), { retain: false });
-      mqttClient.publish(`warema/${snr}/wind/state`, String(w.wind ?? ''), { retain: false });
-      mqttClient.publish(`warema/${snr}/rain/state`, String(w.rain ?? ''), { retain: false });
+      mqttClient.publish(`warema/${snr}/illuminance/state`, String((w.lumen !== undefined) ? w.lumen : ''), { retain: false });
+      mqttClient.publish(`warema/${snr}/temperature/state`, String((w.temp !== undefined) ? w.temp : ''), { retain: false });
+      mqttClient.publish(`warema/${snr}/wind/state`, String((w.wind !== undefined) ? w.wind : ''), { retain: false });
+      mqttClient.publish(`warema/${snr}/rain/state`, String((w.rain !== undefined) ? w.rain : ''), { retain: false });
       break;
     }
     case 'wms-vb-blind-position-update': {
