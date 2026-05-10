@@ -67,6 +67,7 @@ const TRACKING_MAX_PROBES = Math.max(1, parseInt(env('TRACKING_MAX_PROBES', '4')
 // and refine per device from observed long moves.
 const DEFAULT_TRAVEL_TIME_FULL_MS = 45000;
 const PROGRESS_UPDATE_INTERVAL_MS = 1000;
+const TYPE25_RESEND_DELAY_MS = 900;
 
 // Device handling
 const IGNORED_DEVICES = new Set(
@@ -106,6 +107,7 @@ const trackingState = new Map(); // SNR -> { remaining:Number, expectedPosition:
 const progressTimers = new Map(); // SNR -> interval handle
 const movementSamples = new Map(); // SNR -> { startPos, targetPos, ts }
 const deviceTravelTimeMs = new Map(); // SNR -> measured full-travel time
+const resendTimers = new Map(); // SNR -> timeout handle
 
 /** ============= Helpers ============= */
 
@@ -250,6 +252,10 @@ function fromWmsPosition(snr, wmsPosition) {
 
 function clearProgressSimulation(snr) {
   clearTimerFor(progressTimers, snr);
+}
+
+function clearResendTimer(snr) {
+  clearTimerFor(resendTimers, snr);
 }
 
 function getEffectiveTravelTimeMs(snr) {
@@ -397,9 +403,8 @@ function shouldTrackPosition(snr) {
 
 function sendMoveCommand(snr, position, angle) {
   const previous = positions.get(snr);
-  const startPos = previous && Number.isFinite(parseInt(previous.position, 10))
-    ? parseInt(previous.position, 10)
-    : clampPosition(position);
+  const hasKnownStart = !!(previous && Number.isFinite(parseInt(previous.position, 10)));
+  const startPos = hasKnownStart ? parseInt(previous.position, 10) : clampPosition(position);
   const normalizedPosition = clampPosition(position);
   const normalizedAngle = normalizeAngleForDevice(snr, angle);
   const wmsPosition = toWmsPosition(snr, normalizedPosition);
@@ -440,12 +445,34 @@ function sendMoveCommand(snr, position, angle) {
   if (ok) {
     lastMoveByDevice.set(snr, { ts: now, position: normalizedPosition, angle: normalizedAngle });
     moveInFlightUntil.set(snr, now + MOVE_COOLDOWN_MS);
-    // Optimistic publish keeps HA state from staying "unknown" when callbacks
-    // are sparse or delayed.
-    positions.set(snr, { position: normalizedPosition, angle: normalizedAngle });
-    publishPositionState(snr, normalizedPosition, normalizedAngle);
-    maybeStartMovementSample(snr, startPos, normalizedPosition);
-    startProgressSimulation(snr, startPos, normalizedPosition, normalizedAngle);
+    // Show movement progress in HA when a start position is known.
+    if (hasKnownStart && startPos !== normalizedPosition) {
+      positions.set(snr, { position: startPos, angle: normalizedAngle });
+      publishPositionState(snr, startPos, normalizedAngle);
+      maybeStartMovementSample(snr, startPos, normalizedPosition);
+      startProgressSimulation(snr, startPos, normalizedPosition, normalizedAngle);
+    } else {
+      positions.set(snr, { position: normalizedPosition, angle: normalizedAngle });
+      publishPositionState(snr, normalizedPosition, normalizedAngle);
+    }
+
+    // Type-25 often times out without confirmation although command was sent.
+    // Repeat once after a short delay if no newer move superseded it.
+    clearResendTimer(snr);
+    if (getDeviceType(snr) === 25) {
+      const moveTs = now;
+      const timer = setTimeout(() => {
+        resendTimers.delete(snr);
+        const latest = lastMoveByDevice.get(snr);
+        if (!latest || latest.ts !== moveTs) return;
+        const pending = pendingMoveTargets.get(snr);
+        if (pending && Math.abs(clampPosition(pending.position) - normalizedPosition) > 2) return;
+        console.log(`Repeating move command to ${snr}: haPosition=${normalizedPosition} wmsPosition=${wmsPosition}`);
+        callStickMethod('vnBlindSetPosition', snr, wmsPosition, normalizedAngle);
+      }, TYPE25_RESEND_DELAY_MS);
+      resendTimers.set(snr, timer);
+    }
+
     if (shouldTrackPosition(snr)) {
       startPositionTracking(snr, normalizedPosition);
     } else {
@@ -862,6 +889,7 @@ function stickCallback(err, msg) {
       const ang = Number.isFinite(parseInt(msg.payload.angle, 10)) ? parseInt(msg.payload.angle, 10) : 0;
       console.log(`WMS remote update ${snr}: wmsPosition=${wmsPos} haPosition=${pos} tilt=${ang}`);
       clearProgressSimulation(snr);
+      clearResendTimer(snr);
       maybeFinishMovementSample(snr, pos);
       positions.set(snr, { position: pos, angle: ang });
       publishPositionState(snr, pos, ang);
@@ -885,6 +913,7 @@ function stickCallback(err, msg) {
             const pos = fromWmsPosition(snr, wmsPos);
             const normalizedAngle = Number.isFinite(ang) ? ang : 0;
             clearProgressSimulation(snr);
+            clearResendTimer(snr);
             maybeFinishMovementSample(snr, pos);
             positions.set(snr, { position: pos, angle: normalizedAngle });
             publishPositionState(snr, pos, normalizedAngle);
@@ -961,6 +990,7 @@ mqttClient.on('message', (topic, messageBuf) => {
         pendingMoveTargets.delete(snr);
         clearPositionTracking(snr);
         clearProgressSimulation(snr);
+        clearResendTimer(snr);
         movementSamples.delete(snr);
         callStickMethod('vnBlindStop', snr, false);
         schedulePositionProbe(snr, 4000);
@@ -992,6 +1022,7 @@ process.on('SIGINT', () => {
   for (const timer of probeTimers.values()) clearTimeout(timer);
   for (const timer of trackingTimers.values()) clearTimeout(timer);
   for (const timer of progressTimers.values()) clearTimeout(timer);
+  for (const timer of resendTimers.values()) clearTimeout(timer);
   closeStick();
   process.exit(0);
 });
