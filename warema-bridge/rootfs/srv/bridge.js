@@ -108,6 +108,7 @@ const progressTimers = new Map(); // SNR -> interval handle
 const movementSamples = new Map(); // SNR -> { startPos, targetPos, ts }
 const deviceTravelTimeMs = new Map(); // SNR -> measured full-travel time
 const resendTimers = new Map(); // SNR -> timeout handle
+const activeTargets = new Map(); // SNR -> { position:Number, angle:Number, deadlineTs:Number }
 
 /** ============= Helpers ============= */
 
@@ -258,6 +259,29 @@ function clearResendTimer(snr) {
   clearTimerFor(resendTimers, snr);
 }
 
+function setActiveTarget(snr, targetPos, angle, startPos) {
+  const to = clampPosition(targetPos);
+  const from = clampPosition(startPos);
+  const fullTravelMs = getEffectiveTravelTimeMs(snr);
+  const durationMs = Math.max(MOVE_COOLDOWN_MS, Math.round((fullTravelMs * Math.abs(to - from)) / 100));
+  const deadlineTs = Date.now() + durationMs + 12000;
+  activeTargets.set(snr, { position: to, angle, deadlineTs });
+}
+
+function getActiveTarget(snr) {
+  const target = activeTargets.get(snr);
+  if (!target) return null;
+  if (Date.now() > target.deadlineTs) {
+    activeTargets.delete(snr);
+    return null;
+  }
+  return target;
+}
+
+function clearActiveTarget(snr) {
+  activeTargets.delete(snr);
+}
+
 function getEffectiveTravelTimeMs(snr) {
   const measured = deviceTravelTimeMs.get(snr);
   if (Number.isFinite(measured) && measured >= 1000) return measured;
@@ -288,6 +312,40 @@ function maybeFinishMovementSample(snr, currentPos) {
   const next = Math.round((prev * 0.6) + (fullTravelEstimate * 0.4));
   deviceTravelTimeMs.set(snr, next);
   console.log(`Measured travel time for ${snr}: ${next}ms (sample ${elapsed}ms over ${Math.abs(sample.targetPos - sample.startPos)}%).`);
+}
+
+function applyReportedPosition(snr, reportedPos, reportedAngle, source) {
+  const pos = clampPosition(reportedPos);
+  const angle = Number.isFinite(parseInt(reportedAngle, 10)) ? parseInt(reportedAngle, 10) : 0;
+  positions.set(snr, { position: pos, angle });
+  publishPositionState(snr, pos, angle);
+  maybeFinishMovementSample(snr, pos);
+
+  const target = getActiveTarget(snr);
+  if (!target) {
+    clearProgressSimulation(snr);
+    clearResendTimer(snr);
+    return;
+  }
+
+  if (Math.abs(pos - target.position) <= 3) {
+    console.log(`Target reached for ${snr} via ${source}: position=${pos}`);
+    clearActiveTarget(snr);
+    clearProgressSimulation(snr);
+    clearResendTimer(snr);
+    clearPositionTracking(snr);
+    moveInFlightUntil.set(snr, 0);
+    drainPendingMoveIfAny(snr);
+    return;
+  }
+
+  // Keep following real reported position while target is not reached yet.
+  startProgressSimulation(snr, pos, target.position, angle);
+  if (shouldTrackPosition(snr)) {
+    startPositionTracking(snr, target.position);
+  } else {
+    schedulePositionProbe(snr, 5000);
+  }
 }
 
 function startProgressSimulation(snr, startPos, targetPos, angle) {
@@ -445,6 +503,7 @@ function sendMoveCommand(snr, position, angle) {
   if (ok) {
     lastMoveByDevice.set(snr, { ts: now, position: normalizedPosition, angle: normalizedAngle });
     moveInFlightUntil.set(snr, now + MOVE_COOLDOWN_MS);
+    setActiveTarget(snr, normalizedPosition, normalizedAngle, startPos);
     // Show movement progress in HA when a start position is known.
     if (hasKnownStart && startPos !== normalizedPosition) {
       positions.set(snr, { position: startPos, angle: normalizedAngle });
@@ -888,11 +947,7 @@ function stickCallback(err, msg) {
       const pos = fromWmsPosition(snr, wmsPos);
       const ang = Number.isFinite(parseInt(msg.payload.angle, 10)) ? parseInt(msg.payload.angle, 10) : 0;
       console.log(`WMS remote update ${snr}: wmsPosition=${wmsPos} haPosition=${pos} tilt=${ang}`);
-      clearProgressSimulation(snr);
-      clearResendTimer(snr);
-      maybeFinishMovementSample(snr, pos);
-      positions.set(snr, { position: pos, angle: ang });
-      publishPositionState(snr, pos, ang);
+      applyReportedPosition(snr, pos, ang, 'remote-update');
       clearTimerFor(probeTimers, snr);
       const state = trackingState.get(snr);
       if (state && state.expectedPosition !== null && Math.abs(pos - state.expectedPosition) <= 3) {
@@ -911,21 +966,11 @@ function stickCallback(err, msg) {
           // updates while moving, so command result should still update MQTT state.
           if (Number.isFinite(wmsPos)) {
             const pos = fromWmsPosition(snr, wmsPos);
-            const normalizedAngle = Number.isFinite(ang) ? ang : 0;
-            clearProgressSimulation(snr);
-            clearResendTimer(snr);
-            maybeFinishMovementSample(snr, pos);
-            positions.set(snr, { position: pos, angle: normalizedAngle });
-            publishPositionState(snr, pos, normalizedAngle);
+            applyReportedPosition(snr, pos, ang, 'cmd-result-set-position');
           }
-          moveInFlightUntil.set(snr, 0);
-          if (shouldTrackPosition(snr)) {
-            startPositionTracking(snr, Number.isFinite(wmsPos) ? fromWmsPosition(snr, wmsPos) : null);
-          } else {
-            clearPositionTracking(snr);
-            clearTimerFor(probeTimers, snr);
+          if (!Number.isFinite(wmsPos) && shouldTrackPosition(snr)) {
+            startPositionTracking(snr, null);
           }
-          drainPendingMoveIfAny(snr);
         }
       }
       break;
@@ -935,6 +980,7 @@ function stickCallback(err, msg) {
         const snr = parseSnr(msg.payload.snr);
         if (snr) {
           moveInFlightUntil.set(snr, 0);
+          clearActiveTarget(snr);
           clearPositionTracking(snr);
           drainPendingMoveIfAny(snr);
           schedulePositionProbe(snr, 4000);
@@ -991,6 +1037,7 @@ mqttClient.on('message', (topic, messageBuf) => {
         clearPositionTracking(snr);
         clearProgressSimulation(snr);
         clearResendTimer(snr);
+        clearActiveTarget(snr);
         movementSamples.delete(snr);
         callStickMethod('vnBlindStop', snr, false);
         schedulePositionProbe(snr, 4000);
