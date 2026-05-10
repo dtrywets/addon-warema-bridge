@@ -63,8 +63,10 @@ const MOVE_COOLDOWN_MS = Math.max(0, parseInt(env('MOVE_COOLDOWN_MS', '4500'), 1
 const TRACKING_INITIAL_DELAY_MS = Math.max(200, parseInt(env('TRACKING_INITIAL_DELAY_MS', '1200'), 10) || 1200);
 const TRACKING_INTERVAL_MS = Math.max(500, parseInt(env('TRACKING_INTERVAL_MS', '3000'), 10) || 3000);
 const TRACKING_MAX_PROBES = Math.max(1, parseInt(env('TRACKING_MAX_PROBES', '4'), 10) || 4);
-const TRAVEL_TIME_FULL_MS = Math.max(1000, parseInt(env('TRAVEL_TIME_FULL_MS', '45000'), 10) || 45000);
-const PROGRESS_UPDATE_INTERVAL_MS = Math.max(200, parseInt(env('PROGRESS_UPDATE_INTERVAL_MS', '1000'), 10) || 1000);
+// Full travel-time calibration is automatic; we use an internal start guess
+// and refine per device from observed long moves.
+const DEFAULT_TRAVEL_TIME_FULL_MS = 45000;
+const PROGRESS_UPDATE_INTERVAL_MS = 1000;
 
 // Device handling
 const IGNORED_DEVICES = new Set(
@@ -253,7 +255,7 @@ function clearProgressSimulation(snr) {
 function getEffectiveTravelTimeMs(snr) {
   const measured = deviceTravelTimeMs.get(snr);
   if (Number.isFinite(measured) && measured >= 1000) return measured;
-  return TRAVEL_TIME_FULL_MS;
+  return DEFAULT_TRAVEL_TIME_FULL_MS;
 }
 
 function maybeStartMovementSample(snr, startPos, targetPos) {
