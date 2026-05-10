@@ -220,6 +220,28 @@ function normalizeAngleForDevice(snr, angle) {
   return angle;
 }
 
+function clampPosition(position) {
+  const n = parseInt(position, 10);
+  if (!Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 100) return 100;
+  return n;
+}
+
+function toWmsPosition(snr, haPosition) {
+  const clamped = clampPosition(haPosition);
+  // Type-25 awnings are inverted in the field setup:
+  // HA 100% (open) should map to WMS 0 (extended).
+  if (getDeviceType(snr) === 25) return 100 - clamped;
+  return clamped;
+}
+
+function fromWmsPosition(snr, wmsPosition) {
+  const clamped = clampPosition(wmsPosition);
+  if (getDeviceType(snr) === 25) return 100 - clamped;
+  return clamped;
+}
+
 function shouldDispatchCommand(snr, key) {
   const now = Date.now();
   const prev = recentCommands.get(snr);
@@ -308,12 +330,14 @@ function shouldTrackPosition(snr) {
 }
 
 function sendMoveCommand(snr, position, angle) {
+  const normalizedPosition = clampPosition(position);
   const normalizedAngle = normalizeAngleForDevice(snr, angle);
+  const wmsPosition = toWmsPosition(snr, normalizedPosition);
   const now = Date.now();
   const inflightUntil = moveInFlightUntil.get(snr) || 0;
   if (now < inflightUntil) {
     // Command still in flight: coalesce to last target.
-    pendingMoveTargets.set(snr, { position, angle: normalizedAngle });
+    pendingMoveTargets.set(snr, { position: normalizedPosition, angle: normalizedAngle });
     return false;
   }
   const prevMove = lastMoveByDevice.get(snr);
@@ -322,10 +346,10 @@ function sendMoveCommand(snr, position, angle) {
   // user retries (e.g. 100 -> 100). Keep near-duplicate filtering for others.
   const shouldSuppressNearDuplicate = getDeviceType(snr) !== 25;
   if (shouldSuppressNearDuplicate && prevMove && (now - prevMove.ts) < 12000) {
-    const samePosition = Math.abs(((prevMove.position !== undefined) ? prevMove.position : 0) - position) <= 2;
+    const samePosition = Math.abs(((prevMove.position !== undefined) ? prevMove.position : 0) - normalizedPosition) <= 2;
     const sameAngle = Math.abs(((prevMove.angle !== undefined) ? prevMove.angle : 0) - normalizedAngle) <= 5;
     if (samePosition && sameAngle) {
-      console.log(`Skipping near-duplicate move for ${snr}: position=${position} angle=${normalizedAngle}`);
+      console.log(`Skipping near-duplicate move for ${snr}: position=${normalizedPosition} angle=${normalizedAngle}`);
       return false;
     }
   }
@@ -341,17 +365,17 @@ function sendMoveCommand(snr, position, angle) {
   }
 
   // Do not force STOP before every move: this can itself time out and block queue.
-  console.log(`Sending move command to ${snr}: position=${position} angle=${normalizedAngle}`);
-  const ok = callStickMethod('vnBlindSetPosition', snr, position, normalizedAngle);
+  console.log(`Sending move command to ${snr}: haPosition=${normalizedPosition} wmsPosition=${wmsPosition} angle=${normalizedAngle}`);
+  const ok = callStickMethod('vnBlindSetPosition', snr, wmsPosition, normalizedAngle);
   if (ok) {
-    lastMoveByDevice.set(snr, { ts: now, position, angle: normalizedAngle });
+    lastMoveByDevice.set(snr, { ts: now, position: normalizedPosition, angle: normalizedAngle });
     moveInFlightUntil.set(snr, now + MOVE_COOLDOWN_MS);
     // Optimistic publish keeps HA state from staying "unknown" when callbacks
     // are sparse or delayed.
-    positions.set(snr, { position, angle: normalizedAngle });
-    publishPositionState(snr, position, normalizedAngle);
+    positions.set(snr, { position: normalizedPosition, angle: normalizedAngle });
+    publishPositionState(snr, normalizedPosition, normalizedAngle);
     if (shouldTrackPosition(snr)) {
-      startPositionTracking(snr, position);
+      startPositionTracking(snr, normalizedPosition);
     } else {
       clearPositionTracking(snr);
       clearTimerFor(probeTimers, snr);
@@ -558,8 +582,9 @@ function publishDiscoveryForDevice({ snr, name, type }) {
         unique_id: String(snr),
         has_entity_name: true,
         device: { ...baseDevice, model },
-        position_open: 0,
-        position_closed: 100,
+        // Awning semantics in HA: 100=open, 0=closed.
+        position_open: 100,
+        position_closed: 0,
         command_topic: `warema/${snr}/set`,
         position_topic: `warema/${snr}/position`,
         set_position_topic: `warema/${snr}/set_position`,
@@ -761,9 +786,10 @@ function stickCallback(err, msg) {
         ensureDeviceRegistered({ snr, name: String(snr), type: 25 });
       }
 
-      const pos = Number.isFinite(parseInt(msg.payload.position, 10)) ? parseInt(msg.payload.position, 10) : 0;
+      const wmsPos = Number.isFinite(parseInt(msg.payload.position, 10)) ? parseInt(msg.payload.position, 10) : 0;
+      const pos = fromWmsPosition(snr, wmsPos);
       const ang = Number.isFinite(parseInt(msg.payload.angle, 10)) ? parseInt(msg.payload.angle, 10) : 0;
-      console.log(`WMS remote update ${snr}: position=${pos} tilt=${ang}`);
+      console.log(`WMS remote update ${snr}: wmsPosition=${wmsPos} haPosition=${pos} tilt=${ang}`);
       positions.set(snr, { position: pos, angle: ang });
       publishPositionState(snr, pos, ang);
       clearTimerFor(probeTimers, snr);
@@ -777,19 +803,20 @@ function stickCallback(err, msg) {
       console.log(`WMS command result set-position: ${JSON.stringify(msg.payload)}`);
       if (msg.payload) {
         const snr = parseSnr(msg.payload.snr);
-        const pos = parseInt(msg.payload.position, 10);
+        const wmsPos = parseInt(msg.payload.position, 10);
         const ang = parseInt(msg.payload.angle, 10);
         if (snr) {
           // Fallback publish: some installations do not emit continuous position
           // updates while moving, so command result should still update MQTT state.
-          if (Number.isFinite(pos)) {
+          if (Number.isFinite(wmsPos)) {
+            const pos = fromWmsPosition(snr, wmsPos);
             const normalizedAngle = Number.isFinite(ang) ? ang : 0;
             positions.set(snr, { position: pos, angle: normalizedAngle });
             publishPositionState(snr, pos, normalizedAngle);
           }
           moveInFlightUntil.set(snr, 0);
           if (shouldTrackPosition(snr)) {
-            startPositionTracking(snr, Number.isFinite(pos) ? pos : null);
+            startPositionTracking(snr, Number.isFinite(wmsPos) ? fromWmsPosition(snr, wmsPos) : null);
           } else {
             clearPositionTracking(snr);
             clearTimerFor(probeTimers, snr);
@@ -850,10 +877,11 @@ mqttClient.on('message', (topic, messageBuf) => {
     case 'set': {
       const val = msgStr.toUpperCase();
       if (!shouldDispatchCommand(snr, `set:${val}`)) break;
+      const isType25 = getDeviceType(snr) === 25;
       if (val === 'CLOSE') {
-        sendMoveCommand(snr, 100, 0);
+        sendMoveCommand(snr, isType25 ? 0 : 100, 0);
       } else if (val === 'OPEN') {
-        sendMoveCommand(snr, 0, -100);
+        sendMoveCommand(snr, isType25 ? 100 : 0, -100);
       } else if (val === 'STOP') {
         clearTimerFor(pendingMoveTimers, snr);
         pendingMoveTargets.delete(snr);
