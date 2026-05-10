@@ -103,7 +103,32 @@ const trackingState = new Map(); // SNR -> { remaining:Number, expectedPosition:
 /** ============= Helpers ============= */
 
 function parseSnr(val) {
-  const n = parseInt(String(val).replace(/[^0-9]/g, ''), 10);
+  if (val === undefined || val === null) return null;
+
+  if (typeof val === 'number') {
+    return Number.isFinite(val) ? Math.trunc(val) : null;
+  }
+
+  const raw = String(val).trim();
+  if (!raw) return null;
+
+  // Prefer plain decimal representation if available.
+  if (/^[0-9]+$/.test(raw)) {
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  // Some callbacks use hexadecimal SNR values (e.g. E4CA0E).
+  const hexCandidate = raw.replace(/^0x/i, '').replace(/[^0-9a-fA-F]/g, '');
+  if (hexCandidate && /[a-fA-F]/.test(hexCandidate)) {
+    const n = parseInt(hexCandidate, 16);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  // Fallback: keep backward-compatible behavior for mixed strings.
+  const decCandidate = raw.replace(/[^0-9]/g, '');
+  if (!decCandidate) return null;
+  const n = parseInt(decCandidate, 10);
   return Number.isFinite(n) ? n : null;
 }
 
@@ -734,7 +759,15 @@ function stickCallback(err, msg) {
       if (msg.payload) {
         const snr = parseSnr(msg.payload.snr);
         const pos = parseInt(msg.payload.position, 10);
+        const ang = parseInt(msg.payload.angle, 10);
         if (snr) {
+          // Fallback publish: some installations do not emit continuous position
+          // updates while moving, so command result should still update MQTT state.
+          if (Number.isFinite(pos)) {
+            const normalizedAngle = Number.isFinite(ang) ? ang : 0;
+            positions.set(snr, { position: pos, angle: normalizedAngle });
+            publishPositionState(snr, pos, normalizedAngle);
+          }
           moveInFlightUntil.set(snr, 0);
           startPositionTracking(snr, Number.isFinite(pos) ? pos : null);
           drainPendingMoveIfAny(snr);
