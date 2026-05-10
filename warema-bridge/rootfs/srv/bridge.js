@@ -317,7 +317,11 @@ function sendMoveCommand(snr, position, angle) {
     return false;
   }
   const prevMove = lastMoveByDevice.get(snr);
-  if (prevMove && (now - prevMove.ts) < 12000) {
+  // Type-25 devices often report command timeouts despite physically moving.
+  // For these devices, suppressing same-target retries for 12s can drop valid
+  // user retries (e.g. 100 -> 100). Keep near-duplicate filtering for others.
+  const shouldSuppressNearDuplicate = getDeviceType(snr) !== 25;
+  if (shouldSuppressNearDuplicate && prevMove && (now - prevMove.ts) < 12000) {
     const samePosition = Math.abs(((prevMove.position !== undefined) ? prevMove.position : 0) - position) <= 2;
     const sameAngle = Math.abs(((prevMove.angle !== undefined) ? prevMove.angle : 0) - normalizedAngle) <= 5;
     if (samePosition && sameAngle) {
@@ -862,7 +866,8 @@ mqttClient.on('message', (topic, messageBuf) => {
     case 'set_position': {
       const target = parseInt(msgStr, 10);
       const pos = Number.isFinite(target) ? target : safePos;
-      if (!shouldDispatchCommand(snr, `set_position:${pos}`)) break;
+      // queueSetPositionCommand already debounces slider bursts. Additional
+      // duplicate suppression here can drop valid retries for identical targets.
       queueSetPositionCommand(snr, pos, safeAngle);
       break;
     }
