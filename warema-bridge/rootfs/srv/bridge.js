@@ -67,7 +67,6 @@ const TRACKING_MAX_PROBES = Math.max(1, parseInt(env('TRACKING_MAX_PROBES', '4')
 // and refine per device from observed long moves.
 const DEFAULT_TRAVEL_TIME_FULL_MS = 45000;
 const PROGRESS_UPDATE_INTERVAL_MS = 1000;
-const TYPE25_RESEND_DELAY_MS = 900;
 
 // Device handling
 const IGNORED_DEVICES = new Set(
@@ -107,8 +106,8 @@ const trackingState = new Map(); // SNR -> { remaining:Number, expectedPosition:
 const progressTimers = new Map(); // SNR -> interval handle
 const movementSamples = new Map(); // SNR -> { startPos, targetPos, ts }
 const deviceTravelTimeMs = new Map(); // SNR -> measured full-travel time
-const resendTimers = new Map(); // SNR -> timeout handle
 const activeTargets = new Map(); // SNR -> { position:Number, angle:Number, deadlineTs:Number }
+const activeTargetTimers = new Map(); // SNR -> timeout handle
 
 /** ============= Helpers ============= */
 
@@ -255,8 +254,20 @@ function clearProgressSimulation(snr) {
   clearTimerFor(progressTimers, snr);
 }
 
-function clearResendTimer(snr) {
-  clearTimerFor(resendTimers, snr);
+function clearActiveTargetTimer(snr) {
+  clearTimerFor(activeTargetTimers, snr);
+}
+
+function finalizeActiveTargetFromTimeout(snr, expectedPos) {
+  const target = activeTargets.get(snr);
+  if (!target) return;
+  if (Math.abs(target.position - expectedPos) > 1) return;
+  console.log(`Target timeout fallback for ${snr}: position=${target.position}`);
+  clearActiveTarget(snr);
+  clearPositionTracking(snr);
+  clearProgressSimulation(snr);
+  moveInFlightUntil.set(snr, 0);
+  drainPendingMoveIfAny(snr);
 }
 
 function setActiveTarget(snr, targetPos, angle, startPos) {
@@ -266,6 +277,12 @@ function setActiveTarget(snr, targetPos, angle, startPos) {
   const durationMs = Math.max(MOVE_COOLDOWN_MS, Math.round((fullTravelMs * Math.abs(to - from)) / 100));
   const deadlineTs = Date.now() + durationMs + 12000;
   activeTargets.set(snr, { position: to, angle, deadlineTs });
+  clearActiveTargetTimer(snr);
+  const timer = setTimeout(() => {
+    activeTargetTimers.delete(snr);
+    finalizeActiveTargetFromTimeout(snr, to);
+  }, durationMs + 12000);
+  activeTargetTimers.set(snr, timer);
 }
 
 function getActiveTarget(snr) {
@@ -280,6 +297,7 @@ function getActiveTarget(snr) {
 
 function clearActiveTarget(snr) {
   activeTargets.delete(snr);
+  clearActiveTargetTimer(snr);
 }
 
 function getEffectiveTravelTimeMs(snr) {
@@ -324,7 +342,6 @@ function applyReportedPosition(snr, reportedPos, reportedAngle, source) {
   const target = getActiveTarget(snr);
   if (!target) {
     clearProgressSimulation(snr);
-    clearResendTimer(snr);
     return;
   }
 
@@ -332,7 +349,6 @@ function applyReportedPosition(snr, reportedPos, reportedAngle, source) {
     console.log(`Target reached for ${snr} via ${source}: position=${pos}`);
     clearActiveTarget(snr);
     clearProgressSimulation(snr);
-    clearResendTimer(snr);
     clearPositionTracking(snr);
     moveInFlightUntil.set(snr, 0);
     drainPendingMoveIfAny(snr);
@@ -513,23 +529,6 @@ function sendMoveCommand(snr, position, angle) {
     } else {
       positions.set(snr, { position: normalizedPosition, angle: normalizedAngle });
       publishPositionState(snr, normalizedPosition, normalizedAngle);
-    }
-
-    // Type-25 often times out without confirmation although command was sent.
-    // Repeat once after a short delay if no newer move superseded it.
-    clearResendTimer(snr);
-    if (getDeviceType(snr) === 25) {
-      const moveTs = now;
-      const timer = setTimeout(() => {
-        resendTimers.delete(snr);
-        const latest = lastMoveByDevice.get(snr);
-        if (!latest || latest.ts !== moveTs) return;
-        const pending = pendingMoveTargets.get(snr);
-        if (pending && Math.abs(clampPosition(pending.position) - normalizedPosition) > 2) return;
-        console.log(`Repeating move command to ${snr}: haPosition=${normalizedPosition} wmsPosition=${wmsPosition}`);
-        callStickMethod('vnBlindSetPosition', snr, wmsPosition, normalizedAngle);
-      }, TYPE25_RESEND_DELAY_MS);
-      resendTimers.set(snr, timer);
     }
 
     if (shouldTrackPosition(snr)) {
@@ -1036,7 +1035,6 @@ mqttClient.on('message', (topic, messageBuf) => {
         pendingMoveTargets.delete(snr);
         clearPositionTracking(snr);
         clearProgressSimulation(snr);
-        clearResendTimer(snr);
         clearActiveTarget(snr);
         movementSamples.delete(snr);
         callStickMethod('vnBlindStop', snr, false);
@@ -1069,7 +1067,7 @@ process.on('SIGINT', () => {
   for (const timer of probeTimers.values()) clearTimeout(timer);
   for (const timer of trackingTimers.values()) clearTimeout(timer);
   for (const timer of progressTimers.values()) clearTimeout(timer);
-  for (const timer of resendTimers.values()) clearTimeout(timer);
+  for (const timer of activeTargetTimers.values()) clearTimeout(timer);
   closeStick();
   process.exit(0);
 });
