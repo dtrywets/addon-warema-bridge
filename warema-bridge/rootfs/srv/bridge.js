@@ -301,6 +301,12 @@ function startPositionTracking(snr, expectedPosition = null) {
   scheduleTrackingProbe(snr, TRACKING_INITIAL_DELAY_MS);
 }
 
+function shouldTrackPosition(snr) {
+  // Type-25 devices frequently time out on blindGetPos; aggressive probing can
+  // overwhelm the queue and degrade movement behavior.
+  return getDeviceType(snr) !== 25;
+}
+
 function sendMoveCommand(snr, position, angle) {
   const normalizedAngle = normalizeAngleForDevice(snr, angle);
   const now = Date.now();
@@ -336,7 +342,16 @@ function sendMoveCommand(snr, position, angle) {
   if (ok) {
     lastMoveByDevice.set(snr, { ts: now, position, angle: normalizedAngle });
     moveInFlightUntil.set(snr, now + MOVE_COOLDOWN_MS);
-    startPositionTracking(snr, position);
+    // Optimistic publish keeps HA state from staying "unknown" when callbacks
+    // are sparse or delayed.
+    positions.set(snr, { position, angle: normalizedAngle });
+    publishPositionState(snr, position, normalizedAngle);
+    if (shouldTrackPosition(snr)) {
+      startPositionTracking(snr, position);
+    } else {
+      clearPositionTracking(snr);
+      clearTimerFor(probeTimers, snr);
+    }
   }
   return ok;
 }
@@ -769,7 +784,12 @@ function stickCallback(err, msg) {
             publishPositionState(snr, pos, normalizedAngle);
           }
           moveInFlightUntil.set(snr, 0);
-          startPositionTracking(snr, Number.isFinite(pos) ? pos : null);
+          if (shouldTrackPosition(snr)) {
+            startPositionTracking(snr, Number.isFinite(pos) ? pos : null);
+          } else {
+            clearPositionTracking(snr);
+            clearTimerFor(probeTimers, snr);
+          }
           drainPendingMoveIfAny(snr);
         }
       }
