@@ -1,6 +1,6 @@
 {
   "name": "Warema Bridge - dtry",
-  "version": "1.018",
+  "version": "1.019",
   "slug": "warema_bridge",
   "description": "Control Warema WMS system",
   "arch": ["aarch64", "amd64", "armv7", "i386"],
@@ -13,6 +13,8 @@
     "wms_serial_port": null,
     "polling_interval": 30000,
     "moving_interval": 5000,
+    "travel_time_full_ms": 45000,
+    "progress_update_interval_ms": 1000,
     "known_devices": [],
     "mqtt": {
     "server": "mqtt://core-mosquitto:1883",
@@ -27,6 +29,8 @@
     "wms_serial_port": "device(subsystem=tty)",
     "polling_interval": "int?",
     "moving_interval": "int?",
+    "travel_time_full_ms": "int?",
+    "progress_update_interval_ms": "int?",
     "known_devices": [{
       "snr": "int",
       "type": "int",

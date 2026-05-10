@@ -63,6 +63,8 @@ const MOVE_COOLDOWN_MS = Math.max(0, parseInt(env('MOVE_COOLDOWN_MS', '4500'), 1
 const TRACKING_INITIAL_DELAY_MS = Math.max(200, parseInt(env('TRACKING_INITIAL_DELAY_MS', '1200'), 10) || 1200);
 const TRACKING_INTERVAL_MS = Math.max(500, parseInt(env('TRACKING_INTERVAL_MS', '3000'), 10) || 3000);
 const TRACKING_MAX_PROBES = Math.max(1, parseInt(env('TRACKING_MAX_PROBES', '4'), 10) || 4);
+const TRAVEL_TIME_FULL_MS = Math.max(1000, parseInt(env('TRAVEL_TIME_FULL_MS', '45000'), 10) || 45000);
+const PROGRESS_UPDATE_INTERVAL_MS = Math.max(200, parseInt(env('PROGRESS_UPDATE_INTERVAL_MS', '1000'), 10) || 1000);
 
 // Device handling
 const IGNORED_DEVICES = new Set(
@@ -99,6 +101,9 @@ const probeTimers = new Map(); // SNR -> timeout handle
 const moveInFlightUntil = new Map(); // SNR -> timestamp
 const trackingTimers = new Map(); // SNR -> timeout handle
 const trackingState = new Map(); // SNR -> { remaining:Number, expectedPosition:Number|null }
+const progressTimers = new Map(); // SNR -> interval handle
+const movementSamples = new Map(); // SNR -> { startPos, targetPos, ts }
+const deviceTravelTimeMs = new Map(); // SNR -> measured full-travel time
 
 /** ============= Helpers ============= */
 
@@ -230,16 +235,75 @@ function clampPosition(position) {
 
 function toWmsPosition(snr, haPosition) {
   const clamped = clampPosition(haPosition);
-  // Type-25 awnings are inverted in the field setup:
-  // HA 100% (open) should map to WMS 0 (extended).
-  if (getDeviceType(snr) === 25) return 100 - clamped;
+  // Keep direct mapping: HA 100(open) -> WMS 100 for awning setup.
+  if (getDeviceType(snr) === 25) return clamped;
   return clamped;
 }
 
 function fromWmsPosition(snr, wmsPosition) {
   const clamped = clampPosition(wmsPosition);
-  if (getDeviceType(snr) === 25) return 100 - clamped;
+  if (getDeviceType(snr) === 25) return clamped;
   return clamped;
+}
+
+function clearProgressSimulation(snr) {
+  clearTimerFor(progressTimers, snr);
+}
+
+function getEffectiveTravelTimeMs(snr) {
+  const measured = deviceTravelTimeMs.get(snr);
+  if (Number.isFinite(measured) && measured >= 1000) return measured;
+  return TRAVEL_TIME_FULL_MS;
+}
+
+function maybeStartMovementSample(snr, startPos, targetPos) {
+  const from = clampPosition(startPos);
+  const to = clampPosition(targetPos);
+  const distance = Math.abs(to - from);
+  if (distance < 80) return;
+  movementSamples.set(snr, { startPos: from, targetPos: to, ts: Date.now() });
+}
+
+function maybeFinishMovementSample(snr, currentPos) {
+  const sample = movementSamples.get(snr);
+  if (!sample) return;
+  const reached = Math.abs(clampPosition(currentPos) - sample.targetPos) <= 3;
+  if (!reached) return;
+
+  const elapsed = Date.now() - sample.ts;
+  movementSamples.delete(snr);
+  if (elapsed < 5000 || elapsed > 180000) return;
+
+  const fullTravelEstimate = Math.round((elapsed * 100) / Math.max(1, Math.abs(sample.targetPos - sample.startPos)));
+  if (fullTravelEstimate < 1000 || fullTravelEstimate > 300000) return;
+  const prev = getEffectiveTravelTimeMs(snr);
+  const next = Math.round((prev * 0.6) + (fullTravelEstimate * 0.4));
+  deviceTravelTimeMs.set(snr, next);
+  console.log(`Measured travel time for ${snr}: ${next}ms (sample ${elapsed}ms over ${Math.abs(sample.targetPos - sample.startPos)}%).`);
+}
+
+function startProgressSimulation(snr, startPos, targetPos, angle) {
+  clearProgressSimulation(snr);
+  const from = clampPosition(startPos);
+  const to = clampPosition(targetPos);
+  if (from === to) return;
+
+  const fullTravelMs = getEffectiveTravelTimeMs(snr);
+  const durationMs = Math.max(PROGRESS_UPDATE_INTERVAL_MS, Math.round((fullTravelMs * Math.abs(to - from)) / 100));
+  const startTs = Date.now();
+
+  const timer = setInterval(() => {
+    const elapsed = Date.now() - startTs;
+    const ratio = Math.min(1, elapsed / durationMs);
+    const current = Math.round(from + ((to - from) * ratio));
+    positions.set(snr, { position: current, angle });
+    publishPositionState(snr, current, angle);
+    if (ratio >= 1) {
+      clearProgressSimulation(snr);
+    }
+  }, PROGRESS_UPDATE_INTERVAL_MS);
+
+  progressTimers.set(snr, timer);
 }
 
 function shouldDispatchCommand(snr, key) {
@@ -330,6 +394,10 @@ function shouldTrackPosition(snr) {
 }
 
 function sendMoveCommand(snr, position, angle) {
+  const previous = positions.get(snr);
+  const startPos = previous && Number.isFinite(parseInt(previous.position, 10))
+    ? parseInt(previous.position, 10)
+    : clampPosition(position);
   const normalizedPosition = clampPosition(position);
   const normalizedAngle = normalizeAngleForDevice(snr, angle);
   const wmsPosition = toWmsPosition(snr, normalizedPosition);
@@ -374,6 +442,8 @@ function sendMoveCommand(snr, position, angle) {
     // are sparse or delayed.
     positions.set(snr, { position: normalizedPosition, angle: normalizedAngle });
     publishPositionState(snr, normalizedPosition, normalizedAngle);
+    maybeStartMovementSample(snr, startPos, normalizedPosition);
+    startProgressSimulation(snr, startPos, normalizedPosition, normalizedAngle);
     if (shouldTrackPosition(snr)) {
       startPositionTracking(snr, normalizedPosition);
     } else {
@@ -582,9 +652,8 @@ function publishDiscoveryForDevice({ snr, name, type }) {
         unique_id: String(snr),
         has_entity_name: true,
         device: { ...baseDevice, model },
-        // Awning semantics in HA: 100=open, 0=closed.
-        position_open: 100,
-        position_closed: 0,
+        position_open: 0,
+        position_closed: 100,
         command_topic: `warema/${snr}/set`,
         position_topic: `warema/${snr}/position`,
         set_position_topic: `warema/${snr}/set_position`,
@@ -790,6 +859,8 @@ function stickCallback(err, msg) {
       const pos = fromWmsPosition(snr, wmsPos);
       const ang = Number.isFinite(parseInt(msg.payload.angle, 10)) ? parseInt(msg.payload.angle, 10) : 0;
       console.log(`WMS remote update ${snr}: wmsPosition=${wmsPos} haPosition=${pos} tilt=${ang}`);
+      clearProgressSimulation(snr);
+      maybeFinishMovementSample(snr, pos);
       positions.set(snr, { position: pos, angle: ang });
       publishPositionState(snr, pos, ang);
       clearTimerFor(probeTimers, snr);
@@ -811,6 +882,8 @@ function stickCallback(err, msg) {
           if (Number.isFinite(wmsPos)) {
             const pos = fromWmsPosition(snr, wmsPos);
             const normalizedAngle = Number.isFinite(ang) ? ang : 0;
+            clearProgressSimulation(snr);
+            maybeFinishMovementSample(snr, pos);
             positions.set(snr, { position: pos, angle: normalizedAngle });
             publishPositionState(snr, pos, normalizedAngle);
           }
@@ -877,15 +950,16 @@ mqttClient.on('message', (topic, messageBuf) => {
     case 'set': {
       const val = msgStr.toUpperCase();
       if (!shouldDispatchCommand(snr, `set:${val}`)) break;
-      const isType25 = getDeviceType(snr) === 25;
       if (val === 'CLOSE') {
-        sendMoveCommand(snr, isType25 ? 0 : 100, 0);
+        sendMoveCommand(snr, 100, 0);
       } else if (val === 'OPEN') {
-        sendMoveCommand(snr, isType25 ? 100 : 0, -100);
+        sendMoveCommand(snr, 0, -100);
       } else if (val === 'STOP') {
         clearTimerFor(pendingMoveTimers, snr);
         pendingMoveTargets.delete(snr);
         clearPositionTracking(snr);
+        clearProgressSimulation(snr);
+        movementSamples.delete(snr);
         callStickMethod('vnBlindStop', snr, false);
         schedulePositionProbe(snr, 4000);
       }
@@ -915,6 +989,7 @@ process.on('SIGINT', () => {
   for (const timer of pendingMoveTimers.values()) clearTimeout(timer);
   for (const timer of probeTimers.values()) clearTimeout(timer);
   for (const timer of trackingTimers.values()) clearTimeout(timer);
+  for (const timer of progressTimers.values()) clearTimeout(timer);
   closeStick();
   process.exit(0);
 });
